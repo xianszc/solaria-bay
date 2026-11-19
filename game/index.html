@@ -3,17 +3,110 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Block Dodger</title>
+<title>SOLARIA BAY — A Sun-Drenched Crime Story</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #11141b; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a75d3; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  /* Read aloud, never shown: the status line screen readers announce. */
   #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+  /* --- HUD ---------------------------------------------------------------- */
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; z-index: 5; }
+  .panel { background: rgba(27,38,59,0.6); border: 1px solid rgba(255,255,255,0.22); border-radius: 8px; backdrop-filter: blur(2px); }
+  #hud-mission { position: absolute; top: 14px; left: 14px; padding: 10px 14px; max-width: 330px; }
+  .mission-kicker { font-size: 11px; letter-spacing: 2px; color: #ffb703; font-weight: 700; }
+  #hud-mission-name { font-size: 24px; font-weight: 800; letter-spacing: 1px; }
+  #hud-mission-obj { font-size: 14px; color: #e8ecf2; margin-top: 2px; }
+  #hud-mission-next { font-size: 12px; color: #9fb0c8; margin-top: 4px; }
+  #hud-right { position: absolute; top: 14px; right: 14px; padding: 8px 14px; text-align: right; min-width: 170px; }
+  #hud-stars { font-size: 22px; letter-spacing: 3px; line-height: 1.1; }
+  #hud-cash { font-size: 22px; font-weight: 800; color: #70e000; }
+  #hud-rep { font-size: 12px; color: #c8d2e0; letter-spacing: 1px; }
+  #hud-police { font-size: 11px; color: #ffb703; margin-top: 4px; line-height: 1.5; }
+  #hud-district { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); font-size: 13px; font-weight: 700; letter-spacing: 3px; color: rgba(255,255,255,0.92); text-shadow: 0 1px 4px rgba(0,0,0,0.6); }
+  #hud-dialog { position: absolute; left: 50%; bottom: 118px; transform: translateX(-50%); display: none; align-items: center; gap: 10px; padding: 8px 14px; max-width: 560px; font-size: 14px; }
+  #hud-portrait { width: 34px; height: 34px; border-radius: 50%; background: #ffb703; color: #1b263b; font-weight: 800; display: flex; align-items: center; justify-content: center; font-size: 13px; flex: none; }
+  #hud-weapons { position: absolute; left: 14px; bottom: 210px; display: flex; flex-direction: column; gap: 4px; }
+  .weapon { background: rgba(27,38,59,0.6); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 4px 10px; font-size: 12px; letter-spacing: 1px; }
+  .weapon.active { border-color: #ffb703; color: #ffb703; }
+  .weapon span { float: right; margin-left: 12px; font-weight: 700; }
+  #hud-radio { position: absolute; right: 14px; bottom: 118px; padding: 6px 12px; font-size: 12px; text-align: right; }
+  #hud-radio-name { display: block; font-weight: 800; color: #ffb703; letter-spacing: 1px; }
+  #hud-speed { position: absolute; right: 16px; bottom: 16px; text-align: right; text-shadow: 0 2px 6px rgba(0,0,0,0.55); }
+  #hud-speed-num { font-size: 52px; font-weight: 800; line-height: 0.95; }
+  #hud-speed-unit { font-size: 12px; letter-spacing: 2px; color: #e8ecf2; }
+  #hud-cond, #hud-nitro { width: 190px; height: 7px; background: rgba(0,0,0,0.45); border-radius: 4px; margin-top: 5px; margin-left: auto; overflow: hidden; }
+  #hud-cond-fill, #hud-nitro-fill { height: 100%; width: 100%; background: #70e000; }
+  #hud-nitro-fill { background: #ffb703; }
+  #hud-minimap { position: absolute; left: 14px; bottom: 14px; width: 180px; height: 180px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.55); box-shadow: 0 2px 10px rgba(0,0,0,0.4); }
+  #hud-crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 26px; font-weight: 300; color: rgba(255,255,255,0.9); text-shadow: 0 0 4px #000; display: none; }
+  #hud-message { position: absolute; top: 84px; left: 50%; transform: translateX(-50%); font-size: 17px; font-weight: 700; letter-spacing: 1px; color: #ffb703; text-shadow: 0 2px 6px rgba(0,0,0,0.7); transition: opacity 0.4s; text-align: center; }
+
+  /* --- Title screen -------------------------------------------------------- */
+  #title { position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; background: linear-gradient(180deg, rgba(42,117,211,0.10) 0%, rgba(27,38,59,0.42) 62%, rgba(27,38,59,0.78) 100%); pointer-events: none; }
+  #title .eyebrow { font-size: 14px; letter-spacing: 6px; color: #ffb703; font-weight: 700; }
+  #title h1 { font-size: 84px; margin: 6px 0 0; letter-spacing: 6px; font-weight: 900; text-shadow: 0 4px 24px rgba(0,0,0,0.55); }
+  #title h1 span { color: #70e000; }
+  #title .tagline { font-size: 17px; color: #e8ecf2; margin-top: 2px; text-shadow: 0 2px 8px rgba(0,0,0,0.6); }
+  #title .crew { display: flex; gap: 18px; margin: 26px 0 8px; }
+  .crew-card { background: rgba(27,38,59,0.72); border: 1px solid rgba(255,255,255,0.25); border-radius: 10px; padding: 12px 16px; width: 190px; text-align: center; }
+  .crew-card .face { width: 58px; height: 58px; border-radius: 50%; margin: 0 auto 8px; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 800; color: #1b263b; }
+  .crew-card .name { font-weight: 800; font-size: 15px; }
+  .crew-card .role { font-size: 12px; color: #ffb703; letter-spacing: 1px; }
+  .crew-card .desc { font-size: 12px; color: #c8d2e0; margin-top: 5px; line-height: 1.45; }
+  #title .buttons { margin-top: 22px; display: flex; gap: 12px; pointer-events: auto; }
+  .bigbtn { font-size: 18px; font-weight: 800; letter-spacing: 2px; padding: 13px 34px; border-radius: 8px; border: none; cursor: pointer; color: #1b263b; background: #70e000; box-shadow: 0 4px 18px rgba(0,0,0,0.4); }
+  .bigbtn:hover { background: #86f510; }
+  .bigbtn.ghost { background: rgba(27,38,59,0.8); color: #fff; border: 1px solid rgba(255,255,255,0.4); }
+  #title .controls { margin-top: 18px; font-size: 13px; color: #dfe6ef; text-shadow: 0 1px 4px rgba(0,0,0,0.7); line-height: 1.7; text-align: center; }
+  #title .controls b { color: #ffb703; }
+
+  /* --- Pause / victory / busted overlay ------------------------------------- */
+  #overlay { position: fixed; inset: 0; z-index: 9; display: none; align-items: center; justify-content: center; flex-direction: column; color: #fff; background: rgba(27,38,59,0.55); text-align: center; }
+  #overlay-title { font-size: 54px; font-weight: 900; letter-spacing: 4px; text-shadow: 0 4px 20px rgba(0,0,0,0.6); }
+  #overlay-lines { font-size: 16px; color: #e8ecf2; margin-top: 10px; line-height: 1.6; }
+  #overlay-prompt { margin-top: 22px; font-size: 15px; color: #ffb703; font-weight: 700; letter-spacing: 1px; }
+  #overlay .buttons { margin-top: 20px; display: flex; gap: 12px; }
+  #overlay .buttons button { display: none; }
 </style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
 </head>
 <body>
-<canvas id="game" aria-label="Block Dodger: move the paddle left and right to dodge falling blocks and catch coins"></canvas>
+<canvas id="game" aria-label="Solaria Bay: drive the lime SOLARIA GT across the raised drawbridge and lose the police"></canvas>
 <p id="status" role="status" aria-live="polite"></p>
+<div id="hud"></div>
+
+<div id="title">
+  <div class="eyebrow">A SUN-DRENCHED CRIME STORY</div>
+  <h1>SOLARIA <span>BAY</span></h1>
+  <div class="tagline">Six jobs. One bridge. A city that never stops watching.</div>
+  <div class="crew">
+    <div class="crew-card"><div class="face" style="background:#70e000">KS</div><div class="name">Kai Solano</div><div class="role">DRIVER</div><div class="desc">Back in Solaria Bay after five years away. The GT is still his.</div></div>
+    <div class="crew-card"><div class="face" style="background:#ffb703">DQ</div><div class="name">Dara Quinn</div><div class="role">FIXER</div><div class="desc">Plans the jobs, watches the radios, never sleeps.</div></div>
+    <div class="crew-card"><div class="face" style="background:#2ec4b6">TM</div><div class="name">Theo Marsh</div><div class="role">LOOKOUT</div><div class="desc">Knows every rooftop, alley and tide in the bay.</div></div>
+  </div>
+  <div class="buttons">
+    <button id="btn-new" class="bigbtn">NEW GAME</button>
+    <button id="btn-continue" class="bigbtn ghost" style="display:none">CONTINUE</button>
+  </div>
+  <div class="controls">
+    <b>W A S D</b> drive / walk &nbsp;·&nbsp; <b>F</b> enter or steal a car &nbsp;·&nbsp; <b>Shift</b> nitro / run &nbsp;·&nbsp; <b>Space</b> brake<br>
+    <b>Click</b> shoot &nbsp;·&nbsp; <b>1 2 3</b> weapons &nbsp;·&nbsp; <b>Q</b> radio &nbsp;·&nbsp; <b>M</b> mute &nbsp;·&nbsp; <b>Esc</b> pause
+  </div>
+</div>
+
+<div id="overlay">
+  <div id="overlay-title">PAUSED</div>
+  <div id="overlay-lines"></div>
+  <div id="overlay-prompt"></div>
+  <div class="buttons">
+    <button id="btn-resume" class="bigbtn">RESUME</button>
+    <button id="btn-retry" class="bigbtn">TRY AGAIN</button>
+    <button id="btn-keep" class="bigbtn">KEEP PLAYING</button>
+  </div>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
