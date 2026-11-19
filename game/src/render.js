@@ -1,99 +1,86 @@
-// Rendering only: the three.js renderer, the chase/foot/title cameras
-// and the fixed shot cameras. No game rules live here — it takes the
-// world and a view description and paints one frame. The camera is
-// smoothed, easing toward where it should be instead of snapping, and
-// the yaw it reports is what walking is relative to.
+// Rendering only: the three.js renderer, the chase / foot / title
+// cameras and the fixed shot cameras. No game rules live here — it takes
+// the world and a view description and paints one frame. The camera is
+// a chase camera: it trails behind the car or the player, smoothed so
+// it never snaps, and it looks slightly ahead of where they are going.
+
 import * as THREE from 'three';
 import { CAMERA } from './config.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
-export const SCREEN_VICTORY = 'victory';
-
 export function createRenderer(canvas) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  return renderer;
+}
 
-  const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(0xffc98a, 700, 1600);
-  const camera = new THREE.PerspectiveCamera(CAMERA.fov, 1, 0.1, 3200);
+export function createCamera() {
+  return new THREE.PerspectiveCamera(CAMERA.fov, window.innerWidth / window.innerHeight, 0.1, 3200);
+}
 
-  // The smoothed camera: a position and a look target that ease toward
-  // their goals instead of jumping there.
-  const pos = new THREE.Vector3(0, 60, 120);
-  const look = new THREE.Vector3(0, 0, 0);
-  let cameraYaw = Math.PI;
+// Smooth a value toward a target: 1 - 0.5^(dt*k) is frame-rate independent.
+function damp(current, target, k, dt) {
+  const a = 1 - Math.pow(0.5, dt * k);
+  return current + (target - current) * a;
+}
 
-  function resize() {
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    renderer.setSize(width, height, false);
-    camera.aspect = width / height;
-    camera.updateProjectionMatrix();
+// `view` is { mode: 'chase' | 'foot' | 'title' | 'fixed', yaw, pitch,
+// target: Vector3, pos: Vector3 (for fixed) }.
+export function updateCamera(camera, view, dt) {
+  if (view.mode === 'fixed') {
+    camera.position.copy(view.pos);
+    camera.lookAt(view.target);
+    return;
   }
-  resize();
-  window.addEventListener('resize', resize);
-
-  function updateCamera(view, dt) {
-    if (view.shotCam) {
-      camera.position.copy(view.shotCam.pos);
-      camera.lookAt(view.shotCam.lookAt);
-      cameraYaw = Math.atan2(-(view.shotCam.lookAt.x - view.shotCam.pos.x), -(view.shotCam.lookAt.z - view.shotCam.pos.z));
-      scene.userData.cameraPosition = camera.position;
-      return;
-    }
-    const target = view.targetPos;
-    const heading = view.targetHeading;
-    // Forward on the ground for this heading is (-sin, -cos).
-    const fx = -Math.sin(heading);
-    const fz = -Math.cos(heading);
-    if (view.mode === 'title') {
-      // A slow orbit over the city: the boulevard, the towers and the
-      // bay in one frame, the sun low on the left.
-      const t = view.time * 0.045;
-      pos.lerp(new THREE.Vector3(Math.sin(t) * 260 - 60, 95, Math.cos(t) * 260), Math.min(1, dt * 1.2));
-      look.lerp(new THREE.Vector3(-140, 45, 0), Math.min(1, dt * 1.2));
-    } else if (view.inCar) {
-      // Chase cam: behind and above the car, looking past it down the
-      // road so the city reads in front of the car, not behind it.
-      pos.lerp(new THREE.Vector3(target.x - fx * CAMERA.chaseDistance, target.y + CAMERA.chaseHeight, target.z - fz * CAMERA.chaseDistance), Math.min(1, dt * 7));
-      look.lerp(new THREE.Vector3(target.x + fx * 8, target.y + 1.4, target.z + fz * 8), Math.min(1, dt * 9));
-    } else {
-      // Foot cam: over Kai's shoulder, close enough that he fills the
-      // lower third of the frame and reads as a person.
-      pos.lerp(new THREE.Vector3(target.x - fx * CAMERA.footDistance, target.y + CAMERA.footHeight, target.z - fz * CAMERA.footDistance), Math.min(1, dt * 8));
-      look.lerp(new THREE.Vector3(target.x + fx * 5, target.y + 1.5, target.z + fz * 5), Math.min(1, dt * 10));
-    }
-    camera.position.copy(pos);
-    camera.lookAt(look);
-    cameraYaw = Math.atan2(-(look.x - pos.x), -(look.z - pos.z));
-    scene.userData.cameraPosition = camera.position;
+  const t = view.target;
+  let dist;
+  let height;
+  let lookAhead = 4;
+  if (view.mode === 'chase') {
+    dist = CAMERA.chaseDistance;
+    height = CAMERA.chaseHeight;
+    lookAhead = 7;
+  } else if (view.mode === 'foot') {
+    dist = CAMERA.footDistance;
+    height = CAMERA.footHeight;
+    lookAhead = 2.5;
+  } else {
+    // Title: a slow orbit over the marina, looking at the towers.
+    const a = view.time * 0.04;
+    const px = -40 + Math.cos(a) * 120;
+    const pz = 282 + Math.sin(a) * 120;
+    camera.position.set(px, 55, pz);
+    camera.lookAt(-280, 60, 0);
+    return;
   }
+  const yaw = view.yaw;
+  const pitch = view.pitch || 0;
+  const back = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const want = new THREE.Vector3(
+    t.x + back.x * dist,
+    t.y + height + Math.sin(pitch) * dist * 0.4,
+    t.z + back.z * dist,
+  );
+  camera.position.x = damp(camera.position.x, want.x, 6, dt);
+  camera.position.y = damp(camera.position.y, want.y, 6, dt);
+  camera.position.z = damp(camera.position.z, want.z, 6, dt);
+  const look = new THREE.Vector3(
+    t.x - back.x * lookAhead,
+    t.y + 1.2,
+    t.z - back.z * lookAhead,
+  );
+  camera.lookAt(look);
+}
 
-  function draw(view, dt) {
-    updateCamera(view, dt);
-    renderer.render(scene, camera);
-  }
-
-  return {
-    scene,
-    camera,
-    draw,
-    get cameraYaw() {
-      return cameraYaw;
-    },
-    snapCamera(view) {
-      // Jump the smoothed camera to its target (used when teleporting).
-      updateCamera(view, 1);
-      pos.copy(camera.position);
-      look.copy(view.shotCam ? view.shotCam.lookAt : look);
-    },
-  };
+export function resizeRenderer(renderer, camera) {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
 }

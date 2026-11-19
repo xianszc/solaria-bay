@@ -1,295 +1,389 @@
-// Vehicles: the hero wedge, traffic, SPD interceptors, and the police
-// helicopter. Every car is arcade physics — real steering, acceleration,
-// braking, nitro, and a jump: hit the raised drawbridge leaf fast enough
-// and the car goes ballistic across the gap. Front is local -z throughout
-// (see models.js), so a car always faces the way it drives.
+// Vehicles: the hero GT, traffic, SPD interceptors, and the police
+// helicopter. Every car is now a real GLB — the lime Aventador hero,
+// a fleet of traffic cars, a white patrol car and a repainted SUV for
+// the police — with separate wheels that spin and steer, and light bars
+// that blink. The physics are arcade: real steering, acceleration,
+// braking, nitro, and the drawbridge jump (hit the raised leaf fast
+// enough and the car flies the 30 m gap). Wanted heat turns into stars,
+// stars turn into interceptors, and three stars brings the helicopter.
+
 import * as THREE from 'three';
-import { HERO_CAR, POLICE_CAR, TRAFFIC_CAR } from './config.js';
-import { buildHelicopter, buildHeroCar, buildSedan } from './models.js';
+import { WORLD, HERO_CAR, TRAFFIC_CAR, POLICE_CAR, WANTED } from './config.js';
+import { makeHelicopter } from './models.js';
 
-const CAR_RADIUS = 2.1;
+const V3 = THREE.Vector3;
+const KMH_TO_MS = 1 / 3.6;
 
-export function createCar(kind, spec, x, z, heading, name) {
-  const color = spec.color ?? 0xdddddd;
-  const built = kind === 'hero'
-    ? buildHeroCar(color)
-    : buildSedan(color, kind === 'police');
-  const topSpeed = (spec.topSpeedKmh ?? 120) / 3.6;
-  const car = {
-    kind,
-    name: name ?? spec.name ?? 'CAR',
-    pos: new THREE.Vector3(x, 0, z),
-    heading,
-    speed: 0, // m/s along the heading
-    speedKmh: 0,
-    topSpeed,
-    accel: spec.accel ?? 22,
-    brake: spec.brake ?? 40,
-    condition: spec.condition ?? 100,
-    maxCondition: spec.condition ?? 100,
-    mesh: built.group,
-    wheels: built.wheels,
-    lightbar: built.lightbar ?? null,
-    steer: 0,
-    airborne: false,
-    vy: 0,
-    nitro: 100,
-    disabled: false,
-    color,
-  };
-  built.group.position.copy(car.pos);
-  built.group.rotation.y = heading;
-  return car;
+// The forward direction for a heading: the car's front is local -Z,
+// so a heading of 0 points north (-z) and the forward vector is
+// (-sin h, -cos h).
+function forwardOf(heading) {
+  return { x: -Math.sin(heading), z: -Math.cos(heading) };
 }
 
-// One arcade-physics step. `controls` carries throttle, steer, brake and
-// nitro. It returns 'jump' when the car leaves the leaf airborne, 'splash'
-// when it lands in the water, and 'landed' when an airborne car touches down.
-export function stepCar(car, controls, dt, world) {
-  if (car.disabled) {
-    car.speed *= Math.max(0, 1 - 2.2 * dt);
-    car.pos.x += -Math.sin(car.heading) * car.speed * dt;
-    car.pos.z += -Math.cos(car.heading) * car.speed * dt;
-    car.speedKmh = car.speed * 3.6;
-    syncMesh(car);
-    return null;
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+// ---------------------------------------------------------------------------
+// One car: a cloned GLB wrapped in a group, with physics state.
+// ---------------------------------------------------------------------------
+
+export function makeCar(assets, key, x, z, heading) {
+  const spec = assets.vehicles[key];
+  const inner = spec.template.clone();
+  inner.rotation.y = spec.forwardY;
+  inner.position.y = spec.lift;
+  const group = new THREE.Group();
+  group.add(inner);
+  group.position.set(x, 0, z);
+  group.rotation.y = heading;
+  // Wheels, re-found in this clone by name.
+  const wheels = [];
+  inner.traverse((o) => {
+    if (typeof o.name === 'string' && spec.wheelNames.includes(o.name)) {
+      wheels.push(o);
+    }
+  });
+  const frontWheels = wheels.filter((w) => /front|fl|fr/i.test(w.name));
+  return {
+    key,
+    spec,
+    group,
+    inner,
+    wheels,
+    frontWheels,
+    beacon: spec.beacon,
+    name: spec.name,
+    x, z,
+    y: 0,
+    vy: 0,
+    airborne: false,
+    heading,
+    speed: 0, // m/s, forward positive
+    steer: 0,
+    condition: 100,
+    nitro: false,
+  };
+}
+
+function syncCarVisual(car) {
+  car.group.position.set(car.x, car.y, car.z);
+  car.group.rotation.y = car.heading;
+  // Spin the wheels; steer the front ones a little.
+  const spin = (car.speed * (1 / 60)) / 0.35;
+  for (const w of car.wheels) {
+    w.rotation.x += spin;
   }
-  const nitroOn = controls.nitro && car.nitro > 0 && controls.throttle > 0;
-  if (nitroOn) car.nitro = Math.max(0, car.nitro - 34 * dt);
-  else car.nitro = Math.min(100, car.nitro + 6 * dt);
-  const boost = nitroOn ? 1.55 : 1;
-  if (controls.throttle > 0) car.speed += car.accel * boost * dt;
-  else if (controls.throttle < 0) {
-    if (car.speed > 0.5) car.speed -= car.brake * dt;
-    else car.speed -= car.accel * 0.5 * dt; // reverse
+  for (const w of car.frontWheels) {
+    w.rotation.y = car.steer * 0.4;
+  }
+}
+
+// Push a point out of every collider it is inside (and below the top of).
+// Returns true if a collision happened.
+function collidePoint(world, x, y, z, radius) {
+  for (const c of world.colliders) {
+    if (y >= c.h) continue;
+    if (x > c.x0 - radius && x < c.x1 + radius && z > c.z0 - radius && z < c.z1 + radius) {
+      // Push out along the smallest penetration axis.
+      const dxl = x - (c.x0 - radius);
+      const dxr = (c.x1 + radius) - x;
+      const dzl = z - (c.z0 - radius);
+      const dzr = (c.z1 + radius) - z;
+      const m = Math.min(dxl, dxr, dzl, dzr);
+      if (m === dxl) return { x: c.x0 - radius, z };
+      if (m === dxr) return { x: c.x1 + radius, z };
+      if (m === dzl) return { x, z: c.z0 - radius };
+      return { x, z: c.z1 + radius };
+    }
+  }
+  return null;
+}
+
+// Drive one car for one fixed step. `controls` is { throttle, steer, nitro }
+// for the player, or an AI-produced equivalent for police/traffic.
+// Returns an event string ('splash' | 'jump' | 'crash' | null).
+export function driveCar(car, dt, controls, world, topSpeedKmh, accel) {
+  const fwd = forwardOf(car.heading);
+  const speedKmh = Math.abs(car.speed) * 3.6;
+  // Steering authority fades at a standstill and at very high speed.
+  const authority = clamp(speedKmh / 24, 0, 1) * (1 - clamp((speedKmh - 130) / 120, 0, 0.55));
+  car.steer = clamp(controls.steer, -1, 1);
+  car.heading += car.steer * 1.9 * authority * dt * (car.speed >= 0 ? 1 : -1);
+  // Acceleration / braking / reverse.
+  const top = topSpeedKmh * KMH_TO_MS * (controls.nitro ? 1.55 : 1);
+  const reverseTop = 48 * KMH_TO_MS;
+  if (controls.throttle > 0) {
+    car.speed = Math.min(car.speed + accel * controls.throttle * dt, top);
+  } else if (controls.throttle < 0) {
+    if (car.speed > 0.5) car.speed = Math.max(car.speed + 42 * controls.throttle * dt, 0);
+    else car.speed = Math.max(car.speed + 14 * controls.throttle * dt, -reverseTop);
   } else {
-    car.speed -= Math.sign(car.speed) * 6 * dt;
-    if (Math.abs(car.speed) < 0.3) car.speed = 0;
+    car.speed -= Math.sign(car.speed) * Math.min(Math.abs(car.speed), 8 * dt);
   }
-  car.speed = Math.min(car.speed, car.topSpeed * boost);
-  car.speed = Math.max(car.speed, -13); // reverse top speed
+  car.nitro = !!controls.nitro;
 
-  // Steering fades to nothing at a standstill and softens at very high speed.
-  const steerAuthority = Math.min(1, Math.abs(car.speed) / 6) * (1 - Math.min(0.45, Math.abs(car.speed) / (car.topSpeed * 2.4)));
-  car.steer += (controls.steer - car.steer) * Math.min(1, dt * 8);
-  car.heading += car.steer * steerAuthority * 2.1 * dt * Math.sign(car.speed || 1);
+  // Move.
+  const nx = car.x + fwd.x * car.speed * dt;
+  const nz = car.z + fwd.z * car.speed * dt;
 
-  const fx = -Math.sin(car.heading);
-  const fz = -Math.cos(car.heading);
-  car.pos.x += fx * car.speed * dt;
-  car.pos.z += fz * car.speed * dt;
-
-  // Ground: follow the deck, the leaf and the ramps — or fly.
-  const ground = world.heightAt(car.pos.x, car.pos.z);
+  // Building collision: push out, scrape the paint, lose speed.
+  const hit = collidePoint(world, nx, car.y, nz, 1.1);
   let event = null;
+  if (hit) {
+    car.x = hit.x;
+    car.z = hit.z;
+    if (Math.abs(car.speed) > 3) {
+      car.condition = Math.max(0, car.condition - Math.abs(car.speed) * 0.9);
+      event = 'crash';
+    }
+    car.speed *= 0.45;
+  } else {
+    car.x = nx;
+    car.z = nz;
+  }
+
+  // Ground: the leaf, the deck, the island, or water.
+  const ground = world.heightAt(car.x, car.z);
   if (car.airborne) {
-    car.vy -= 9.8 * dt;
-    car.pos.y += car.vy * dt;
-    if (ground !== null && car.pos.y <= ground) {
-      car.pos.y = ground;
-      car.airborne = false;
+    car.vy -= 22 * dt;
+    car.y += car.vy * dt;
+    if (ground !== null && car.y <= ground) {
+      car.y = ground;
       car.vy = 0;
-      event = 'landed';
-    } else if (ground === null && car.pos.y <= -1) {
+      car.airborne = false;
+    } else if (car.y < WORLD.waterY + 0.5) {
       event = 'splash';
     }
   } else if (ground === null) {
-    // Drove off an edge with no ground: it is a splash, not a flight.
+    // Drove off the edge — into the bay.
     event = 'splash';
   } else {
-    // Leaving the leaf's tip fast enough launches the car into the air.
-    const onLeaf = car.pos.x > 430 && car.pos.x < 452 && Math.abs(car.pos.z) <= 10;
-    if (onLeaf && car.speed * 3.6 > 52 && car.pos.x > 449) {
+    // Leaving the leaf tip fast enough launches the car.
+    const onLeafTip = car.x > WORLD.bridgeLeafX + 24 && car.x < WORLD.bridgeGapX1 && Math.abs(car.z) <= 12;
+    const leafY = WORLD.deckY + (car.x - WORLD.bridgeLeafX) * Math.tan(WORLD.bridgeLeafAngle);
+    if (onLeafTip && car.y >= leafY - 0.6 && car.speed * 3.6 > 52) {
       car.airborne = true;
-      car.vy = car.speed * Math.sin(0.5236);
+      car.vy = car.speed * Math.sin(WORLD.bridgeLeafAngle) * 0.9;
+      car.y = leafY;
       event = 'jump';
-    }
-    car.pos.y = ground;
-  }
-
-  // Building collisions: push the car out of the box, bleed speed, and
-  // take condition damage. A car at 0 condition is wrecked.
-  for (const c of world.colliders) {
-    const px = Math.max(c.x0 - CAR_RADIUS, Math.min(car.pos.x, c.x1 + CAR_RADIUS));
-    const pz = Math.max(c.z0 - CAR_RADIUS, Math.min(car.pos.z, c.z1 + CAR_RADIUS));
-    if (px === car.pos.x && pz === car.pos.z) continue;
-    const dx = car.pos.x - px;
-    const dz = car.pos.z - pz;
-    if (dx * dx + dz * dz < CAR_RADIUS * CAR_RADIUS) {
-      const pushLeft = car.pos.x - (c.x0 - CAR_RADIUS);
-      const pushRight = (c.x1 + CAR_RADIUS) - car.pos.x;
-      const pushTop = car.pos.z - (c.z0 - CAR_RADIUS);
-      const pushBottom = (c.z1 + CAR_RADIUS) - car.pos.z;
-      const min = Math.min(pushLeft, pushRight, pushTop, pushBottom);
-      if (min === pushLeft) car.pos.x = c.x0 - CAR_RADIUS;
-      else if (min === pushRight) car.pos.x = c.x1 + CAR_RADIUS;
-      else if (min === pushTop) car.pos.z = c.z0 - CAR_RADIUS;
-      else car.pos.z = c.z1 + CAR_RADIUS;
-      car.speed *= 0.55;
-      car.condition = Math.max(0, car.condition - Math.abs(car.speed) * 0.12);
-      if (car.condition <= 0) car.disabled = true;
+    } else {
+      car.y = ground;
     }
   }
 
-  car.speedKmh = car.speed * 3.6;
-  syncMesh(car);
+  syncCarVisual(car);
   return event;
 }
 
-function syncMesh(car) {
-  car.mesh.position.copy(car.pos);
-  car.mesh.rotation.y = car.heading;
-  // Lean into steering, pitch up while airborne.
-  car.mesh.rotation.z = -car.steer * 0.06 * Math.min(1, Math.abs(car.speed) / 12);
-  car.mesh.rotation.x = car.airborne ? -0.12 : 0;
-  for (const wheel of car.wheels) wheel.rotation.x += (car.speed / 0.4) * 0.016;
-}
+// ---------------------------------------------------------------------------
+// Traffic: cars looping rectangular street circuits, easing off for the
+// car ahead so they don't pile up.
+// ---------------------------------------------------------------------------
 
-// --- Traffic ------------------------------------------------------------------
-// Cars loop on rectangular street circuits. They ease off for the car
-// ahead and keep the city feeling alive, with no pathfinding at all.
-
-export function createTraffic(world, random) {
-  const cars = [];
-  const colors = [0xe8e4d8, 0x3fae9c, 0xe88a7a, 0x8a9bb0, 0xd9a441, 0x7a6a9b, 0x4a7a3a, 0xc0c8d0];
-  const circuits = [
-    [[-240, -240], [240, -240], [240, 240], [-240, 240]],
-    [[-160, -160], [160, -160], [160, 160], [-160, 160]],
-    [[-80, -80], [80, -80], [80, 80], [-80, 80]],
-    [[-240, 0], [240, 0], [240, -240], [-240, -240]],
-    [[0, -240], [0, 240], [160, 240], [160, -240]],
+function makeCircuit(rng, half) {
+  // A rectangle on the street grid: pick a random half-size.
+  const h = half;
+  return [
+    { x: -h, z: -h }, { x: h, z: -h }, { x: h, z: h }, { x: -h, z: h },
   ];
-  for (let i = 0; i < TRAFFIC_CAR.count; i += 1) {
-    const circuit = circuits[i % circuits.length];
-    const start = circuit[Math.floor(random.next() * circuit.length)];
-    const car = createCar('traffic', { color: colors[i % colors.length], topSpeedKmh: TRAFFIC_CAR.topSpeedKmh }, start[0] + random.range(-4, 4), start[1] + random.range(-4, 4), random.range(0, Math.PI * 2), 'TRAFFIC');
-    car.circuit = circuit;
-    car.waypoint = Math.floor(random.next() * circuit.length);
-    cars.push(car);
-  }
-  return cars;
 }
 
-export function stepTraffic(cars, dt, world, playerCar) {
-  for (const car of cars) {
-    if (car.disabled) continue;
-    const target = car.circuit[car.waypoint];
-    const dx = target[0] - car.pos.x;
-    const dz = target[1] - car.pos.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist < 8) {
-      car.waypoint = (car.waypoint + 1) % car.circuit.length;
-      continue;
+export class Traffic {
+  constructor(scene, assets, world, rng) {
+    this.world = world;
+    this.rng = rng;
+    this.cars = [];
+    const keys = ['taxi', 'sedan', 'hatchback', 'pickup', 'pickupOld', 'van', 'tow', 'bus'];
+    for (let i = 0; i < TRAFFIC_CAR.count; i++) {
+      const key = keys[i % keys.length];
+      const half = rng.pick([80, 160, 240]);
+      const circuit = makeCircuit(rng, half);
+      const start = circuit[rng.int(0, 3)];
+      const next = circuit[(rng.int(0, 3) + 1) % 4];
+      const heading = Math.atan2(-(next.x - start.x), -(next.z - start.z));
+      const car = makeCar(assets, key, start.x + rng.range(-4, 4), start.z + rng.range(-4, 4), heading);
+      car.circuit = circuit;
+      car.wp = 0;
+      car.cruise = rng.range(0.55, 0.85);
+      scene.add(car.group);
+      this.cars.push(car);
     }
-    const wantHeading = Math.atan2(-dx, -dz);
-    let diff = wantHeading - car.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    const steer = Math.max(-1, Math.min(1, diff * 2.2));
-    // Ease off when the player's car is right ahead.
-    let throttle = 0.75;
-    if (playerCar) {
-      const pdx = playerCar.pos.x - car.pos.x;
-      const pdz = playerCar.pos.z - car.pos.z;
-      const ahead = pdx * -Math.sin(car.heading) + pdz * -Math.cos(car.heading);
-      const side = Math.abs(pdx * Math.cos(car.heading) - pdz * Math.sin(car.heading));
-      if (ahead > 0 && ahead < 14 && side < 4) throttle = 0;
-    }
-    stepCar(car, { throttle, steer, brake: false, nitro: false }, dt, world);
   }
-}
-
-// --- Police ---------------------------------------------------------------------
-// Interceptors spawn at the island edges and chase the player down. They
-// ram; a hard ram damages the player's car and adds heat. A wrecked
-// interceptor (condition 0) stops dead and is towed away after a few seconds.
-
-export function createPolice(scene) {
-  const cars = [];
-  let spawnTimer = 0;
-  return {
-    cars,
-    update(dt, world, player, playerCar, onRam) {
-      const wanted = player.wantedStars;
-      const wantCount = wanted === 0 ? 0 : Math.min(2 + wanted, 7);
-      spawnTimer -= dt;
-      if (cars.length < wantCount && spawnTimer <= 0) {
-        spawnTimer = 1.6;
-        const angle = Math.random() * Math.PI * 2;
-        const px = Math.max(-300, Math.min(300, player.pos.x + Math.cos(angle) * 90));
-        const pz = Math.max(-300, Math.min(300, player.pos.z + Math.sin(angle) * 90));
-        const car = createCar('police', { color: 0xf4f6f8, topSpeedKmh: POLICE_CAR.topSpeedKmh, accel: POLICE_CAR.accel, condition: POLICE_CAR.condition }, px, pz, 0, POLICE_CAR.name);
-        car.chase = true;
-        scene.add(car.mesh);
-        cars.push(car);
+  update(dt) {
+    for (const car of this.cars) {
+      const target = car.circuit[car.wp];
+      const dx = target.x - car.x;
+      const dz = target.z - car.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist < 6) {
+        car.wp = (car.wp + 1) % car.circuit.length;
+        continue;
       }
-      for (let i = cars.length - 1; i >= 0; i -= 1) {
-        const car = cars[i];
-        if (car.disabled) {
-          car.removeTimer = (car.removeTimer ?? 6) - dt;
-          if (car.removeTimer <= 0) {
-            scene.remove(car.mesh);
-            cars.splice(i, 1);
-          }
-          continue;
-        }
-        const dx = player.pos.x - car.pos.x;
-        const dz = player.pos.z - car.pos.z;
-        const dist = Math.hypot(dx, dz);
-        const wantHeading = Math.atan2(-dx, -dz);
-        let diff = wantHeading - car.heading;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        const steer = Math.max(-1, Math.min(1, diff * 2.4));
-        stepCar(car, { throttle: dist > 6 ? 1 : 0.4, steer, brake: false, nitro: false }, dt, world);
-        // Ramming: touching the player's car damages it, and touching the
-        // player on foot hurts the player instead.
-        if (playerCar && dist < 4.6) {
-          const impact = Math.abs(car.speed - playerCar.speed);
-          if (impact > 4) {
-            playerCar.condition = Math.max(0, playerCar.condition - POLICE_CAR.ramDamage * (impact / 18));
-            car.condition = Math.max(0, car.condition - 8);
-            onRam(impact);
-            if (playerCar.condition <= 0) playerCar.disabled = true;
-            if (car.condition <= 0) car.disabled = true;
-            car.pos.x += (dx / (dist || 1)) * -2;
-            car.pos.z += (dz / (dist || 1)) * -2;
-          }
-        } else if (!playerCar && dist < 2.2) {
-          player.health = Math.max(0, player.health - 26 * dt);
-        }
-        // The light bar blinks red and blue in alternation.
-        if (car.lightbar) {
-          const phase = Math.floor(performance.now() / 280) % 2;
-          car.lightbar.red.material.emissive.setHex(phase ? 0xff2222 : 0x220000);
-          car.lightbar.blue.material.emissive.setHex(phase ? 0x000022 : 0x2222ff);
+      const wantHeading = Math.atan2(-dx, -dz);
+      let dh = wantHeading - car.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const steer = clamp(dh * 1.6, -1, 1);
+      // Ease off if the car ahead (any car) is close in front.
+      let throttle = car.cruise;
+      const fwd = forwardOf(car.heading);
+      for (const other of this.cars) {
+        if (other === car) continue;
+        const ox = other.x - car.x;
+        const oz = other.z - car.z;
+        const ahead = ox * fwd.x + oz * fwd.z;
+        const side = Math.abs(ox * fwd.z - oz * fwd.x);
+        if (ahead > 0 && ahead < 9 && side < 2.4) {
+          throttle = 0;
+          break;
         }
       }
-    },
-  };
+      driveCar(car, dt, { throttle, steer, nitro: false }, this.world, car.spec.topSpeedKmh, car.spec.accel);
+    }
+  }
 }
 
-// --- Helicopter -------------------------------------------------------------------
-// Shows up at 3+ wanted stars and hangs over the player, rotor turning,
-// a soft pool of light on the ground underneath it.
+// ---------------------------------------------------------------------------
+// Police + wanted + helicopter.
+// ---------------------------------------------------------------------------
 
-export function createHelicopter(scene) {
-  const built = buildHelicopter();
-  const group = built.group;
-  group.visible = false;
-  scene.add(group);
-  return {
-    mesh: group,
-    update(dt, targetPos, active, time) {
-      group.visible = active;
-      if (!active) return;
-      const hover = new THREE.Vector3(targetPos.x + 14, 52, targetPos.z - 10);
-      group.position.lerp(hover, Math.min(1, dt * 1.4));
-      group.rotation.y = Math.atan2(-(targetPos.x - group.position.x), -(targetPos.z - group.position.z));
-      built.rotor.rotation.y += dt * 22;
-      built.tailRotor.rotation.x += dt * 30;
-      built.pool.position.set(0, -group.position.y + 0.4, 0);
-      built.pool.material.opacity = 0.11 + Math.sin(time * 2.2) * 0.03;
-    },
-  };
+export class Police {
+  constructor(scene, assets, world, rng) {
+    this.scene = scene;
+    this.assets = assets;
+    this.world = world;
+    this.rng = rng;
+    this.cars = [];
+    this.heat = 0;
+    this.stars = 0;
+    this.quietTime = 0;
+    this.blink = 0;
+    this.heli = null;
+    this.heliGroup = null;
+  }
+  addHeat(amount) {
+    this.heat = Math.min(this.heat + amount, WANTED.heatPerStar * WANTED.maxStars);
+    this.quietTime = 0;
+  }
+  get wantedStars() {
+    return Math.min(WANTED.maxStars, Math.floor(this.heat / WANTED.heatPerStar));
+  }
+  // How many interceptors the current heat calls for.
+  desiredCount() {
+    return Math.min(2 + this.wantedStars, 7);
+  }
+  spawnOne() {
+    const key = this.rng.chance(0.6) ? 'policePatrol' : 'policeSuv';
+    // Spawn at an island edge, roughly toward the player.
+    const edge = this.rng.pick([
+      { x: -300, z: this.rng.range(-280, 280) },
+      { x: 300, z: this.rng.range(-280, 280) },
+      { x: this.rng.range(-280, 280), z: -300 },
+      { x: this.rng.range(-280, 280), z: 300 },
+    ]);
+    const car = makeCar(this.assets, key, edge.x, edge.z, this.rng.range(0, Math.PI * 2));
+    car.condition = POLICE_CAR.condition;
+    this.scene.add(car.group);
+    this.cars.push(car);
+    return car;
+  }
+  removeCar(car) {
+    this.scene.remove(car.group);
+    const i = this.cars.indexOf(car);
+    if (i >= 0) this.cars.splice(i, 1);
+  }
+  ensureHelicopter() {
+    if (this.heliGroup) return;
+    this.heliGroup = makeHelicopter();
+    this.heliGroup.visible = false;
+    this.scene.add(this.heliGroup);
+    // A soft pool of light under the heli.
+    const pool = new THREE.Mesh(
+      new THREE.CircleGeometry(9, 24),
+      new THREE.MeshBasicMaterial({ color: 0xfff6e5, transparent: true, opacity: 0.14, depthWrite: false }),
+    );
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.y = 0.1;
+    this.heliGroup.add(pool);
+    this.heliGroup.userData.pool = pool;
+  }
+  update(dt, player, playerCar) {
+    // Stars from heat; heat decays after a quiet spell with no police near.
+    this.stars = this.wantedStars;
+    let nearestPolice = Infinity;
+    for (const c of this.cars) {
+      nearestPolice = Math.min(nearestPolice, Math.hypot(c.x - player.x, c.z - player.z));
+    }
+    if (this.stars > 0 && nearestPolice > 55) {
+      this.quietTime += dt;
+      if (this.quietTime > WANTED.decayDelay) {
+        this.heat = Math.max(0, this.heat - WANTED.decayPerSecond * dt);
+      }
+    } else {
+      this.quietTime = 0;
+    }
+    // Match the interceptor count to the heat.
+    const want = this.stars > 0 ? this.desiredCount() : 0;
+    while (this.cars.length < want) this.spawnOne();
+    while (this.cars.length > want) this.removeCar(this.cars[this.cars.length - 1]);
+
+    // Chase + ram.
+    const px = playerCar ? playerCar.x : player.x;
+    const pz = playerCar ? playerCar.z : player.z;
+    for (const car of [...this.cars]) {
+      const dx = px - car.x;
+      const dz = pz - car.z;
+      const dist = Math.hypot(dx, dz);
+      const wantHeading = Math.atan2(-dx, -dz);
+      let dh = wantHeading - car.heading;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      const steer = clamp(dh * 1.8, -1, 1);
+      const throttle = dist > 7 ? 1 : 0.55;
+      const event = driveCar(car, dt, { throttle, steer, nitro: false }, this.world, car.spec.topSpeedKmh, car.spec.accel);
+      if (event === 'splash') {
+        this.removeCar(car);
+        continue;
+      }
+      // Ramming the player: close + fast = damage + heat.
+      if (dist < 3.4 && Math.abs(car.speed) > 4) {
+        player.damage(POLICE_CAR.ramDamage * dt * 3, 'ram');
+        this.addHeat(WANTED.ramPolice * dt * 0.5);
+      }
+      // A wrecked interceptor is towed away after 6 s.
+      if (car.condition <= 0) {
+        car.wreckTimer = (car.wreckTimer || 0) + dt;
+        car.group.visible = car.wreckTimer < 6 ? Math.floor(car.wreckTimer * 6) % 2 === 0 : false;
+        if (car.wreckTimer >= 6) this.removeCar(car);
+      }
+    }
+
+    // Light bars blink red/blue.
+    this.blink += dt;
+    const phase = Math.floor(this.blink * 4) % 2;
+    for (const car of this.cars) {
+      for (const m of car.beacon.red || []) {
+        if (m.emissive) m.emissiveIntensity = phase === 0 ? 1.6 : 0.08;
+      }
+      for (const m of car.beacon.blue || []) {
+        if (m.emissive) m.emissiveIntensity = phase === 1 ? 1.6 : 0.08;
+      }
+    }
+
+    // Helicopter at 3+ stars.
+    this.ensureHelicopter();
+    const heli = this.heliGroup;
+    const wantHeli = this.stars >= 3;
+    heli.visible = wantHeli;
+    if (wantHeli) {
+      const target = new V3(px + 14, 52, pz - 10);
+      heli.position.lerp(target, 1 - Math.pow(0.5, dt * 1.2));
+      heli.userData.rotor.rotation.y += dt * 22;
+      heli.userData.tailRotor.rotation.x += dt * 30;
+      heli.userData.pool.position.y = -heli.position.y + 0.15;
+      heli.userData.pool.material.opacity = 0.10 + 0.05 * Math.sin(this.blink * 6);
+    }
+  }
 }

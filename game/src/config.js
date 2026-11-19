@@ -1,18 +1,17 @@
-// SOLARIA BAY — the single source of truth for tuning. Every distance
-// is in metres, every colour is one decision made here, so the rest of
-// the game never hard-codes a number. The island is a 640 x 640 m grid;
-// the causeway runs east across the bay to Solaria Key; the sun hangs
-// low in the west so the late-afternoon light rakes long shadows
-// eastward across warm asphalt.
+// SOLARIA BAY v3 — every number the game tunes lives here, in one place.
+// Distances are metres, speeds are km/h, colours are single decisions.
+// The island is a 640 x 640 m grid; the causeway runs east across the bay
+// to Solaria Key; the sun sits low in the west so the late-afternoon light
+// rakes long shadows eastward across warm asphalt.
 
-export const STEP = 1 / 60; // fixed simulation step: 60 updates a second
+export const STEP = 1 / 60; // fixed simulation slice: 60 updates a second
 
 // The shape of the world. x grows east, z grows south; y is up.
 export const WORLD = {
-  islandHalf: 320, // main island spans x,z in [-320, 320]
+  islandHalf: 320, // the main island spans x,z in [-320, 320]
   keyX0: 560, // Solaria Key begins here
   keyX1: 780,
-  keyZ: 160, // Key spans z in [-160, 160]
+  keyZ: 160, // the Key spans z in [-160, 160]
   waterY: -2,
   deckY: 6, // causeway deck height above the water
   bridgeGapX0: 430, // the drawbridge gap in the causeway
@@ -22,10 +21,19 @@ export const WORLD = {
   garageX: 160, // parking garage (overlook) centre
   garageZ: 120,
   garageRoofY: 12,
+  // The OSM district: a dense real city block placed in the north of the
+  // island. Grid roads and procedural buildings skip this rectangle; the
+  // block brings its own streets and footprints.
+  osmX0: -134,
+  osmX1: 134,
+  osmZ0: -314,
+  osmZ1: -6,
+  osmCX: 0, // centre the block is placed at
+  osmCZ: -160,
 };
 
-// The low western sun: 12 degrees above the horizon, a little north of
-// due west. The cover shot looks straight into it.
+// The low western sun: about 12 degrees above the horizon, a little north
+// of due west. The cover shot looks straight into it, between the towers.
 export const SUN = {
   azimuth: Math.PI, // west (-x)
   elevation: 0.21, // ~12 degrees
@@ -46,8 +54,7 @@ export const PALETTE = {
   shadowCobalt: '#1b263b',
   heroLime: '#70e000',
   heroTrim: '#111111',
-  asphalt: '#332e29', // warm charcoal, not teal — dark enough to stay
-  // charcoal under the low sun; #453f38 washed out to grey-green
+  asphalt: '#332e29', // warm charcoal, dark enough to stay charcoal under the low sun
   asphaltLine: '#e8e4d8',
   sidewalk: '#b9b3a4',
   ground: '#b3a37e', // warm sun-baked tan ground between the roads
@@ -83,7 +90,7 @@ export const CAMERA = {
   fov: 58,
 };
 
-// The hero car: the acid-lime 1980s wedge.
+// The hero car: the acid-lime 1980s wedge, a real GLB now.
 export const HERO_CAR = {
   name: 'SOLARIA GT',
   color: 0x70e000,

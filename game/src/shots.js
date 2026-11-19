@@ -1,264 +1,172 @@
 // The screenshot scenes behind ?shot=drawbridge|boulevard|overlook|pursuit.
 // Each one arranges the real game — real cars, real police, real wanted
 // stars, the real sun — into the composition the brief asks for. The page
-// then paints it twice and sets window.__shotReady. Nothing here is a
-// mock: the same world, the same HUD, the same physics.
+// paints the staged scene twice and then sets window.__shotReady, which
+// the shot driver waits for. Nothing here is composited or borrowed:
+// every pixel comes from the game's own code.
 //
-// Orientation note (the v1 bug): a car flies EAST across the gap, so its
-// heading is -PI/2 — forward (-sin, -cos) is (+1, 0). v1 staged the
-// cover with heading +PI/2, which flies WEST, opposite the mission.
+// The cover (1-drawbridge) has a hard requirement: the helicopter MUST
+// be visible in the frame. It is staged explicitly, hovering above and
+// to the left of the airborne hero, and the camera is aimed so the
+// hero, the heli, the Twin Prism Towers and the sun disc all sit in
+// the same frame.
+
 import * as THREE from 'three';
 
-// Police only spawn while the game loop runs, and a staged shot never
-// steps the loop — so each scene spawns the interceptors it needs by
-// running the real police manager forward, then moves them to their
-// marks. The cars are real: they chase, ram and blink their light bars.
-// The staging player is a copy parked at the city centre, so the
-// interceptors chase that point instead of converging on Kai and
-// hurting him while the scene is arranged.
-function spawnPoliceForShot(game, count) {
-  const police = game.actors.police;
-  game.player.wantedStars = game.wantedStars;
-  const stagingPlayer = { ...game.player, pos: new THREE.Vector3(0, 0, 0) };
-  for (let i = 0; i < 600 && police.cars.length < count; i += 1) {
-    police.update(0.016, game.world, stagingPlayer, null, () => {});
-  }
+// Put a car somewhere and make it look like it belongs there.
+function placeCar(car, x, z, heading, speedKmh = 0) {
+  car.x = x;
+  car.z = z;
+  car.heading = heading;
+  car.speed = speedKmh / 3.6;
+  car.y = 0;
+  car.vy = 0;
+  car.airborne = false;
+  car.group.position.set(x, 0, z);
+  car.group.rotation.y = heading;
 }
 
-// The hero car in the air over the drawbridge gap, nose up, sun directly
-// behind it, Twin Prism Towers behind that.
-function stageDrawbridge(game) {
-  const g = game;
-  g.heat = 800;
-  g.wantedStars = 4;
-  g.player.wantedStars = 4;
-  spawnPoliceForShot(g, 2);
-  const hero = g.actors.heroCar;
-  hero.pos.set(466, 20, -1);
-  hero.heading = -Math.PI / 2; // flying EAST across the gap, toward the camera
-  hero.speed = 26;
-  hero.speedKmh = 94;
-  hero.airborne = true;
-  hero.vy = 4;
-  hero.mesh.position.copy(hero.pos);
-  hero.mesh.rotation.set(-0.1, hero.heading, 0.04);
-  g.currentCar = hero;
-  g.player.pos.copy(hero.pos);
-  // The helicopter hangs over the gap, rotor turning, in frame above the car.
-  g.actors.heli.update(0.016, new THREE.Vector3(456, 0, 0), true, 1.2);
-  g.actors.heli.mesh.position.set(430, 42, -22);
-  const police = g.actors.police.cars;
-  // The interceptors are right under the car on the near side of the gap,
-  // close enough to read (8 m per the HUD) and centred in the frame —
-  // v1's spots sat at the frame edges and one was cut off entirely.
-  const spots = [[456, 6, -5, -Math.PI / 2], [456, 6, 5, -Math.PI / 2]];
-  spots.forEach(([x, y, z, h], i) => {
-    const car = police[i];
-    if (!car) return;
-    car.pos.set(x, y, z);
-    car.heading = h;
-    car.speed = 12;
-    car.speedKmh = 43;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.y = h;
-  });
-  // The marker sits on the far deck, clear of the car, so its beam does
-  // not cut through the hero.
-  g.world.setMarker(478, 4);
-  g.dialog = 'DARA: The bridge is up — hit it flat out, Kai. Do not lift.';
-  g.dialogSpeaker = 'DQ';
-  g.missions.skipTo(3);
-  g.missions.setMessage('MISSION 4: THE JUMP — Cross the raised drawbridge', 8);
-  return {
-    shotCam: {
-      // High on the north-east side, looking west and slightly UP at the
-      // car: high enough to see the leaf's asphalt deck (not its
-      // underside — a low eastern camera turns the leaf into a giant
-      // brown slab filling the frame), and aimed so the sun disc (due
-      // west, ~8 degrees up) sits in the upper frame between the Twin
-      // Towers while the interceptors on the deck below stay in the
-      // lower frame. v2 aimed down and the sun fell just outside the
-      // top of the frame; aiming at the car alone cut the police off
-      // at the bottom edge.
-      pos: new THREE.Vector3(480, 22, -12),
-      lookAt: new THREE.Vector3(458, 16, 0),
-    },
-  };
+function placePerson(ped, x, z, heading, state) {
+  ped.x = x;
+  ped.z = z;
+  ped.heading = heading;
+  ped.state = state;
+  ped.group.position.set(x, 0, z);
+  // Face the direction of travel (face is +Z, forward is -sin/-cos).
+  ped.group.rotation.y = heading + Math.PI;
 }
 
-// A tight chase cam behind the lime GT as it drifts around a palm-lined
-// corner on Palm Boulevard — long shadows, glass glinting on the right.
-function stageBoulevard(game) {
-  const g = game;
-  g.heat = 420;
-  g.wantedStars = 3;
-  g.player.wantedStars = 3;
-  spawnPoliceForShot(g, 2);
-  const hero = g.actors.heroCar;
-  hero.pos.set(40, 0, -6);
-  hero.heading = Math.PI / 2; // heading west along the boulevard
-  hero.speed = 24;
-  hero.speedKmh = 86;
-  hero.steer = 0.55;
-  hero.mesh.position.copy(hero.pos);
-  hero.mesh.rotation.y = hero.heading;
-  hero.mesh.rotation.z = -0.05;
-  g.currentCar = hero;
-  g.player.pos.copy(hero.pos);
-  const police = g.actors.police.cars;
-  // The interceptors are AHEAD of the hero (west of it), inside the
-  // chase camera's frame — v1 put them east of the camera, so the HUD
-  // claimed a pursuit no shot ever showed.
-  if (police[0]) {
-    police[0].pos.set(28, 0, -10);
-    police[0].heading = Math.PI / 2;
-    police[0].speed = 20;
-    police[0].speedKmh = 72;
-    police[0].mesh.position.copy(police[0].pos);
-    police[0].mesh.rotation.y = police[0].heading;
-  }
-  if (police[1]) {
-    police[1].pos.set(26, 0, 0);
-    police[1].heading = Math.PI / 2;
-    police[1].speed = 18;
-    police[1].speedKmh = 65;
-    police[1].mesh.position.copy(police[1].pos);
-    police[1].mesh.rotation.y = police[1].heading;
-  }
-  g.actors.heli.update(0.016, new THREE.Vector3(40, 0, 0), true, 2.0);
-  g.actors.heli.mesh.position.set(16, 50, -34);
-  g.dialog = 'DARA: Boulevard is clear past the palms. Keep it sideways, Kai.';
-  g.dialogSpeaker = 'DQ';
-  g.missions.skipTo(2);
-  g.missions.setMessage('MISSION 3: TOWER RUN — Drive to the Twin Prism Towers', 8);
-  return {
-    shotCam: {
-      // A TIGHT chase cam just behind the GT: the car fills the lower
-      // frame, the interceptors ahead of it in frame, the sun and the
-      // towers ahead of them. v1's camera was ~19 m back and the car
-      // read as a toy.
-      pos: new THREE.Vector3(48, 2.6, -2),
-      lookAt: new THREE.Vector3(36, 1.0, -6),
-    },
-  };
-}
+// The four stagings. Each returns { pos, target } for the fixed camera.
+export const SHOTS = {
+  drawbridge(G) {
+    // The hero, airborne over the gap, nose up, mid-flight, heading
+    // east across the gap (heading -PI/2 is east: forward is -sin/-cos).
+    // It sits just past the leaf tip (x=456), clearly in the air over
+    // the 30 m gap, above the deck.
+    placeCar(G.heroCar, 460, 0, -Math.PI / 2, 150);
+    G.heroCar.y = 19;
+    G.heroCar.vy = 6;
+    G.heroCar.airborne = true;
+    G.heroCar.group.position.set(460, 19, 0);
+    G.heroCar.group.rotation.y = -Math.PI / 2;
+    G.heroCar.group.rotation.z = -0.12; // nose up, climbing
+    // Two police in the open: one on the far deck (foreground), one on
+    // the near deck beside the leaf, so neither hides behind the steel.
+    placeCar(G.policeCars[0], 472, -4, -Math.PI / 2, 0);
+    placeCar(G.policeCars[1], 392, 15, -Math.PI / 2, 0);
+    // THE HELICOPTER: hovering above the gap, left of the hero, big in frame.
+    G.heli.visible = true;
+    G.heli.position.set(424, 32, -22);
+    G.heli.userData.rotor.rotation.y = 1.2;
+    // A couple of running pedestrians on the causeway approach, fleeing
+    // west back toward the island.
+    placePerson(G.peds[0], 380, -8, Math.PI / 2, 'run');
+    placePerson(G.peds[1], 386, 8, Math.PI / 2, 'run');
+    G.police.heat = 620; // three stars on the HUD
+    G.missions.index = 3;
+    G.missions.step = 1;
+    G.world.setMarker(472, 0, true);
+    return {
+      pos: new THREE.Vector3(500, 16, 20),
+      target: new THREE.Vector3(430, 14, -2),
+    };
+  },
 
-// Kai on the parking garage roof, over his shoulder, pistol aimed west
-// at the roadblock below — the whole CBD skyline and the apricot horizon
-// behind him.
-function stageOverlook(game) {
-  const g = game;
-  g.heat = 600;
-  g.wantedStars = 3;
-  g.player.wantedStars = 3;
-  spawnPoliceForShot(g, 2);
-  g.currentCar = null;
-  // Kai stands on the GROUND at the garage gate (not the roof): from a
-  // rooftop camera the roof deck occludes the street below, so the
-  // roadblock was invisible in every roof staging. On the ground, Kai,
-  // the roadblock and the skyline are all on one sight line.
-  g.player.pos.set(128, 0, 116);
-  g.player.heading = Math.PI / 2; // facing west, toward the towers
-  g.player.mesh.position.copy(g.player.pos);
-  g.player.mesh.rotation.y = g.player.heading;
-  g.player.parts.armR.rotation.x = 1.35; // pistol arm raised forward (see characters.js: positive = forward)
-  g.player.aiming = true; // hold the aim pose: the loop keeps running
-  // Shot mode does not step the simulation, so animateWalk never runs
-  // here — set the pistol and the support arm directly, or the gun stays
-  // invisible and the left arm hangs (the v1.1 overlook bug).
-  g.player.parts.pistol.visible = true;
-  g.player.parts.armL.rotation.x = 0.7;
-  g.weapon = 1;
-  const police = g.actors.police.cars;
-  // The roadblock sits on the street just west of the gate, ~16 m from
-  // Kai and straddling his line of sight, so BOTH interceptors are in
-  // frame and big enough to read as police cars.
-  const spots = [[112, 104, Math.PI / 2], [112, 128, Math.PI / 2]];
-  spots.forEach(([x, z, h], i) => {
-    const car = police[i];
-    if (!car) return;
-    car.pos.set(x, 0, z);
-    car.heading = h;
-    car.speed = 0;
-    car.speedKmh = 0;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.y = h;
-  });
-  g.dialog = 'KAI: Two units at the garage gate. I can see the whole bay from here.';
-  g.dialogSpeaker = 'KS';
-  g.missions.skipTo(4);
-  g.missions.setMessage('MISSION 5: GOLDEN HOUR — Lose the cops on Solaria Key', 8);
-  return {
-    shotCam: {
-      // Close over the shoulder at street level, ~7 m north-east of Kai
-      // (his pistol side): Kai big in the right third with the pistol arm
-      // in profile, the roadblock visible ahead in the centre, and the
-      // skyline + apricot horizon behind. Ground level keeps all four
-      // elements on one sight line (the roof occluded the street in every
-      // earlier staging).
-      pos: new THREE.Vector3(134, 2.4, 111),
-      lookAt: new THREE.Vector3(112, 1.5, 114),
-    },
-  };
-}
+  boulevard(G) {
+    // The hero cruising down Palm Boulevard into the sunset, a police
+    // car on its tail, palms and the towers ahead. West is heading
+    // PI/2 (forward is -sin/-cos, so PI/2 points at -x, the sunset).
+    // The hero sits close to the camera so it leads the frame.
+    placeCar(G.heroCar, 78, 0, Math.PI / 2, 95);
+    placeCar(G.policeCars[0], 46, -4, Math.PI / 2, 95);
+    placeCar(G.policeCars[1], 88, 5, Math.PI / 2, 80);
+    placeCar(G.policeCars[2], 60, -6, Math.PI / 2, 88);
+    // Traffic ahead, in the same lane as the hero.
+    placeCar(G.trafficCars[0], 130, 0, Math.PI / 2, 60);
+    placeCar(G.trafficCars[1], -30, 4, Math.PI / 2, 55);
+    // Joggers on the sidewalk, mid-stride.
+    placePerson(G.peds[0], 40, 9, Math.PI / 2, 'run');
+    placePerson(G.peds[1], 48, -9, Math.PI / 2, 'run');
+    placePerson(G.peds[2], 90, 9, Math.PI / 2, 'walk');
+    G.heli.visible = false;
+    G.police.heat = 260; // one star
+    G.missions.index = 2;
+    G.missions.step = 0;
+    G.world.setMarker(-238, 0, true);
+    return {
+      pos: new THREE.Vector3(108, 3.5, 8),
+      target: new THREE.Vector3(-40, 3, -2),
+    };
+  },
 
-// A front-facing camera looking back at the hero car, two interceptors
-// closing in behind it, sun flare across the top, palms along the verge.
-function stagePursuit(game) {
-  const g = game;
-  g.heat = 940;
-  g.wantedStars = 5;
-  g.player.wantedStars = 5;
-  spawnPoliceForShot(g, 2);
-  const hero = g.actors.heroCar;
-  hero.pos.set(-40, 0, 2);
-  hero.heading = -Math.PI / 2; // heading east, toward the camera
-  hero.speed = 30;
-  hero.speedKmh = 108;
-  hero.mesh.position.copy(hero.pos);
-  hero.mesh.rotation.y = hero.heading;
-  g.currentCar = hero;
-  g.player.pos.copy(hero.pos);
-  const police = g.actors.police.cars;
-  // The interceptors are west of the hero, chasing east behind it,
-  // close enough to read as pursuers instead of distant toys.
-  const spots = [[-52, -4, -Math.PI / 2], [-54, 7, -Math.PI / 2]];
-  spots.forEach(([x, z, h], i) => {
-    const car = police[i];
-    if (!car) return;
-    car.pos.set(x, 0, z);
-    car.heading = h;
-    car.speed = 28;
-    car.speedKmh = 101;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.y = h;
-  });
-  g.actors.heli.update(0.016, new THREE.Vector3(-40, 0, 0), true, 3.1);
-  g.actors.heli.mesh.position.set(-30, 40, -20);
-  g.dialog = 'DARA: Five stars, Kai. The whole SPD is behind you — do not stop.';
-  g.dialogSpeaker = 'DQ';
-  g.missions.skipTo(5);
-  g.missions.setMessage('MISSION 6: SOLARIA HEIST — Steal the gold case and escape', 8);
-  return {
-    shotCam: {
-      // From the middle of the road ahead of the GT, looking west: the
-      // hero's nose big in frame, both interceptors flanking it close
-      // behind, the low sun flaring over the top. Closer than v1 (34 m
-      // back) so the cars read instead of sitting small in an empty road.
-      pos: new THREE.Vector3(-22, 3.4, 0),
-      lookAt: new THREE.Vector3(-42, 1.5, 2),
-    },
-  };
-}
+  overlook(G) {
+    // Kai on the garage roof, pistol raised, the skyline and the road
+    // below him. The sun is low behind the towers. Kai stands close to
+    // the camera in profile, facing north, pistol aimed north, so the
+    // raised arm and pistol read from the side with the towers behind.
+    G.player.x = 158;
+    G.player.z = 130;
+    G.player.y = 12;
+    G.player.heading = 0; // facing north, in profile to the camera
+    G.player.weapon = 1;
+    G.player.group.position.set(158, 12, 130);
+    G.player.group.rotation.y = 0 + Math.PI;
+    // Aim the pistol: right arm forward.
+    const L = G.player.group.userData.limbs;
+    L.armR.rotation.x = -1.35;
+    L.armL.rotation.x = -0.4;
+    // A runner crossing the roof, and cars parked on the roof so it
+    // reads as a parking deck, not an empty slab. Roof cars sit at
+    // y=12 (the roof), not y=0 — placeCar leaves them at ground level.
+    placePerson(G.peds[0], 168, 114, Math.PI / 2, 'run');
+    G.peds[0].group.position.y = 12;
+    placeCar(G.trafficCars[0], 150, 112, Math.PI / 2, 0);
+    G.trafficCars[0].y = 12;
+    G.trafficCars[0].group.position.y = 12;
+    placeCar(G.trafficCars[1], 170, 128, -Math.PI / 2, 0);
+    G.trafficCars[1].y = 12;
+    G.trafficCars[1].group.position.y = 12;
+    // The hero and a police car on the street below the garage.
+    placeCar(G.heroCar, 150, 92, Math.PI, 0);
+    placeCar(G.policeCars[0], 190, 96, -Math.PI / 2, 0);
+    G.heli.visible = false;
+    G.police.heat = 420; // two stars
+    G.missions.index = 5;
+    G.missions.step = 0;
+    G.world.setMarker(668, 40, true);
+    return {
+      pos: new THREE.Vector3(163, 14.5, 132),
+      target: new THREE.Vector3(-120, 38, 70),
+    };
+  },
 
-const STAGES = {
-  drawbridge: stageDrawbridge,
-  boulevard: stageBoulevard,
-  overlook: stageOverlook,
-  pursuit: stagePursuit,
+  pursuit(G) {
+    // The hero flat out on Palm Boulevard, driving west straight into
+    // the low sun, police flanking both sides, the helicopter high
+    // above. West is heading PI/2 (forward is -sin/-cos).
+    placeCar(G.heroCar, 40, 0, Math.PI / 2, 180);
+    placeCar(G.policeCars[0], 28, -7, Math.PI / 2, 175);
+    placeCar(G.policeCars[1], 32, 7, Math.PI / 2, 170);
+    placeCar(G.policeCars[2], 62, -5, Math.PI / 2, 185);
+    // The helicopter, high and ahead, in the top of the frame.
+    G.heli.visible = true;
+    G.heli.position.set(-10, 42, -28);
+    G.heli.userData.rotor.rotation.y = 2.4;
+    // Traffic scattering ahead, and a jogger on the sidewalk.
+    placeCar(G.trafficCars[0], 100, 4, Math.PI / 2, 70);
+    placeCar(G.trafficCars[1], 110, -5, Math.PI / 2, 65);
+    placePerson(G.peds[0], 60, 9, Math.PI / 2, 'run');
+    G.police.heat = 640; // three stars
+    // Tower Run: the boulevard drive to the towers, which is where
+    // this chase is happening.
+    G.missions.index = 2;
+    G.missions.step = 0;
+    G.world.setMarker(-238, 0, true);
+    return {
+      pos: new THREE.Vector3(80, 5, 2),
+      target: new THREE.Vector3(-30, 5, -4),
+    };
+  },
 };
 
-export function stageShot(name, game) {
-  const stage = STAGES[name] || STAGES.drawbridge;
-  return stage(game);
-}
+export const SHOT_NAMES = ['drawbridge', 'boulevard', 'overlook', 'pursuit'];

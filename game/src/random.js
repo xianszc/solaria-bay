@@ -1,26 +1,30 @@
-// A deterministic random generator (mulberry32) so the city layout,
-// traffic and pedestrians are identical for a given seed. The URL can fix
-// it with ?seed=N; without one the seed is random each visit, which is
-// fine for play but never for screenshots.
+// A small deterministic random source (mulberry32) so the city layout,
+// traffic and pedestrians are identical for a given seed. Pass ?seed=N
+// in the URL to fix it; without one the seed is random each visit, which
+// is fine for play but never for screenshots.
 
 export function createRandom(seed) {
-  let state = seed >>> 0;
+  let s = seed >>> 0;
+  function next() {
+    s |= 0;
+    s = (s + 0x6d2b79f5) | 0;
+    let m = Math.imul(s ^ (s >>> 15), 1 | s);
+    m = (m + Math.imul(m ^ (m >>> 7), 61 | m)) ^ m;
+    return ((m ^ (m >>> 14)) >>> 0) / 4294967296;
+  }
   return {
-    next() {
-      state |= 0;
-      state = (state + 0x6d2b79f5) | 0;
-      let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
-      mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
-      return ((mixed ^ (mixed >>> 14)) >>> 0) / 4294967296;
-    },
+    next,
     range(min, max) {
-      return min + this.next() * (max - min);
+      return min + next() * (max - min);
     },
     int(min, max) {
-      return Math.floor(this.range(min, max + 1));
+      return Math.floor(min + next() * (max - min + 1));
     },
     pick(list) {
-      return list[Math.floor(this.next() * list.length)];
+      return list[Math.floor(next() * list.length)];
+    },
+    chance(p) {
+      return next() < p;
     },
   };
 }

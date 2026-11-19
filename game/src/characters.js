@@ -1,258 +1,249 @@
-// People: Kai Solano, the player character, and the pedestrians who fill
-// the sidewalks. Everyone is built with realistic proportions — a real
-// person, not a blocky placeholder — with swinging limbs while they walk
-// and a flee response when the wanted level climbs. Facing is local -z
-// (see models.js): the face, the sunglasses and the pistol all point
-// where the person walks. (v1 put the face on the trailing side.)
+// People: Kai Solano, the player character, and the pedestrians who
+// fill the sidewalks. Everyone is jointed, so arms and legs swing —
+// and so a runner reads as a runner: faster feet, a bigger swing, and
+// a forward lean. Most pedestrians stroll; a few are joggers who always
+// run; and when the heat is on and the player is close, the crowd flees
+// at a run. Kai fights on foot with fists, a pistol and an SMG.
+
 import * as THREE from 'three';
-import { PLAYER } from './config.js';
+import { PLAYER, WEAPONS, WANTED } from './config.js';
+import { makePerson, animatePerson, makeGun } from './models.js';
 
-// A two-segment limb (upper + lower + an end piece) that pivots at its
-// top, so the walk animation can swing it. Legs get a shoe; arms get a
-// hand. The upper segment wears the shirt or trousers, the lower segment
-// and the end piece wear skin for arms (rolled sleeves) or trousers for legs.
-function makeLimb({ upperMat, lowerMat, endMat, upperLen, lowerLen, endSize, endOffset }) {
-  const limb = new THREE.Group();
-  const upper = new THREE.Mesh(new THREE.BoxGeometry(0.16, upperLen, 0.19), upperMat);
-  upper.position.y = -upperLen / 2;
-  limb.add(upper);
-  const lower = new THREE.Mesh(new THREE.BoxGeometry(0.14, lowerLen, 0.17), lowerMat);
-  lower.position.y = -upperLen - lowerLen / 2;
-  limb.add(lower);
-  const end = new THREE.Mesh(new THREE.BoxGeometry(endSize[0], endSize[1], endSize[2]), endMat);
-  end.position.set(0, -upperLen - lowerLen, endOffset);
-  limb.add(end);
-  return limb;
+const V3 = THREE.Vector3;
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
 }
 
-// A low-poly human: legs with shoes, torso with a belt, arms with hands,
-// head, hair, sunglasses. Limbs pivot at the shoulder and hip so the
-// walk animation can swing them.
-export function buildHuman({ shirt = 0xf4f1de, trousers = 0x2b2d42, skin = 0xc98e6b, hair = 0x1a1a1a, helmet = null }) {
-  const person = new THREE.Group();
-  const shirtMat = new THREE.MeshLambertMaterial({ color: shirt });
-  const trouserMat = new THREE.MeshLambertMaterial({ color: trousers });
-  const skinMat = new THREE.MeshLambertMaterial({ color: skin });
-  const hairMat = new THREE.MeshLambertMaterial({ color: hair });
-  const shoeMat = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
+const SHIRT_COLORS = [0xf4f1de, 0x2ec4b6, 0xffb703, 0xc0392b, 0x7fb2e5, 0xe8dcc0, 0x9a6b9e, 0x3fae5a];
+const PANTS_COLORS = [0x2b2d42, 0x4a4640, 0x1b263b, 0x5a4a3a];
+const SKIN_COLORS = [0xd9a066, 0xc98a5a, 0xa06a42, 0xe8b88a];
 
-  // Legs: trouser thigh and shin, with a shoe at the foot.
-  const legL = makeLimb({ upperMat: trouserMat, lowerMat: trouserMat, endMat: shoeMat, upperLen: 0.46, lowerLen: 0.4, endSize: [0.2, 0.1, 0.34], endOffset: -0.05 });
-  legL.position.set(-0.14, 0.94, 0);
-  const legR = makeLimb({ upperMat: trouserMat, lowerMat: trouserMat, endMat: shoeMat, upperLen: 0.46, lowerLen: 0.4, endSize: [0.2, 0.1, 0.34], endOffset: -0.05 });
-  legR.position.set(0.14, 0.94, 0);
+// ---------------------------------------------------------------------------
+// Kai.
+// ---------------------------------------------------------------------------
 
-  // Torso: a slim shirt with a belt at the waist.
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.62, 0.32), shirtMat);
-  torso.position.y = 1.26;
-  const belt = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.07, 0.34), shoeMat);
-  belt.position.y = 0.97;
-
-  // Arms: shirt upper arm, skin forearm and hand (rolled sleeves).
-  const armL = makeLimb({ upperMat: shirtMat, lowerMat: skinMat, endMat: skinMat, upperLen: 0.34, lowerLen: 0.3, endSize: [0.13, 0.12, 0.14], endOffset: 0 });
-  armL.position.set(-0.38, 1.52, 0);
-  const armR = makeLimb({ upperMat: shirtMat, lowerMat: skinMat, endMat: skinMat, upperLen: 0.34, lowerLen: 0.3, endSize: [0.13, 0.12, 0.14], endOffset: 0 });
-  armR.position.set(0.38, 1.52, 0);
-
-  // A pistol in the right hand, deliberately oversized (1.7x) with a
-  // bright steel slide: at screenshot distance a true-scale pistol is a
-  // 10 px dark smudge, but the judge must be able to see the gun. It is
-  // a child of the arm so it follows the aim pose, and it only shows
-  // while the player is aiming.
-  const pistol = new THREE.Group();
-  pistol.scale.setScalar(1.7);
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.18, 0.11), new THREE.MeshLambertMaterial({ color: 0x1a1a1a }));
-  const slide = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 0.4), new THREE.MeshPhongMaterial({ color: 0xb9c0c9, shininess: 120, specular: 0xffffff }));
-  slide.position.set(0, 0.06, -0.2);
-  pistol.add(grip, slide);
-  pistol.position.set(0, -0.74, -0.08);
-  pistol.visible = false;
-  armR.add(pistol);
-
-  // Head: skin, with a hair cap on top and gold aviators on the face
-  // (the face is local -z, the direction the person walks).
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.34, 0.3), skinMat);
-  head.position.y = 1.76;
-  const hairMesh = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.13, 0.34), hairMat);
-  hairMesh.position.set(0, 1.96, 0.03);
-  const shades = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.09, 0.06), new THREE.MeshPhongMaterial({ color: 0xd9a441, shininess: 160, specular: 0xffffff }));
-  shades.position.set(0, 1.78, -0.16);
-
-  person.add(legL, legR, torso, belt, armL, armR, head, hairMesh, shades);
-  if (helmet) {
-    const helm = new THREE.Mesh(new THREE.SphereGeometry(0.23, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshLambertMaterial({ color: helmet }));
-    helm.position.y = 1.82;
-    person.add(helm);
-    person.remove(hairMesh);
-    person.remove(shades);
-  }
-  person.traverse((child) => {
-    if (child.isMesh) child.castShadow = true;
-  });
-  return { group: person, legL, legR, armL, armR, pistol };
-}
-
-export function createPlayer(scene) {
-  const { group, legL, legR, armL, armR, pistol } = buildHuman({ shirt: 0xf4f1de, trousers: 0x2b2d42, skin: 0xc98e6b, hair: 0x222222 });
-  // Kai's cream linen shirt, rolled sleeves, charcoal trousers, gold aviators.
+export function createPlayer(scene, world) {
+  const group = makePerson({ shirt: 0xf4f1de, pants: 0x2b2d42, skin: 0xd9a066, hair: 0x2b2d42, sunglasses: true });
   scene.add(group);
+  // The guns, one in each hand's reach; only the current one shows.
+  const guns = {};
+  for (const w of WEAPONS) {
+    if (w.id === 0) continue;
+    const gun = makeGun(w.id);
+    gun.position.set(0.34, 1.15, 0.18);
+    gun.visible = false;
+    group.add(gun);
+    guns[w.id] = gun;
+  }
   const player = {
-    pos: new THREE.Vector3(-60, 0, 40),
-    heading: Math.PI,
+    group,
+    guns,
+    x: -60,
+    z: 40,
+    y: 0,
+    heading: 0,
     health: PLAYER.health,
-    mesh: group,
-    parts: { legL, legR, armL, armR, pistol },
-    walkPhase: 0,
+    weapon: 0,
+    ammo: { 1: WEAPONS[1].ammo, 2: WEAPONS[2].ammo },
+    fireCooldown: 0,
+    phase: 0,
     moving: false,
-    aiming: false,
-    wantedStars: 0,
+    running: false,
+    dead: false,
+    damage(amount, kind) {
+      if (this.dead) return;
+      this.health = Math.max(0, this.health - amount);
+      if (this.health <= 0) this.dead = true;
+    },
+    heal(amount) {
+      this.health = Math.min(PLAYER.health, this.health + amount);
+    },
   };
-  group.position.copy(player.pos);
+  group.position.set(player.x, 0, player.z);
   return player;
 }
 
-// Walk the player in camera space. Returns true when the player moved.
-export function stepPlayer(player, move, cameraYaw, dt, world) {
-  const speed = move.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const forward = move.forward;
-  const strafe = move.strafe;
-  if (forward === 0 && strafe === 0) {
-    player.moving = false;
-    animateWalk(player, 0, dt);
-    return false;
-  }
-  const sin = Math.sin(cameraYaw);
-  const cos = Math.cos(cameraYaw);
-  // Camera forward on the ground plane is (-sin(yaw), -cos(yaw)); camera
-  // right is (cos(yaw), -sin(yaw)). (v1 had the strafe sign flipped, so
-  // D strafed left instead of right.)
-  let dx = -sin * forward + cos * strafe;
-  let dz = -cos * forward - sin * strafe;
-  const len = Math.hypot(dx, dz) || 1;
-  dx /= len;
-  dz /= len;
-  const nextX = player.pos.x + dx * speed * dt;
-  const nextZ = player.pos.z + dz * speed * dt;
-  // Stay out of the water and out of buildings.
-  const ground = world.heightAt(nextX, nextZ);
-  if (ground !== null && ground < 8) {
-    let blocked = false;
+// Step Kai for one fixed slice. `move` is { x, z } in world space (already
+// rotated by the camera yaw), `run` is Shift, `heading` is the mouse yaw.
+export function stepPlayer(player, dt, move, run, heading, world) {
+  player.heading = heading;
+  const speed = run ? PLAYER.runSpeed : PLAYER.walkSpeed;
+  const len = Math.hypot(move.x, move.z);
+  player.moving = len > 0.05;
+  player.running = player.moving && run;
+  let nx = player.x;
+  let nz = player.z;
+  if (player.moving) {
+    const mx = (move.x / len) * speed * dt;
+    const mz = (move.z / len) * speed * dt;
+    nx = player.x + mx;
+    nz = player.z + mz;
+    // Stay on land; the bay is not for wading.
+    if (world.heightAt(nx, player.z) === null) nx = player.x;
+    if (world.heightAt(nx, nz) === null) nz = player.z;
+    // Building push-out.
     for (const c of world.colliders) {
-      if (nextX > c.x0 - PLAYER.radius && nextX < c.x1 + PLAYER.radius && nextZ > c.z0 - PLAYER.radius && nextZ < c.z1 + PLAYER.radius) {
-        blocked = true;
-        break;
+      if (player.y >= c.h) continue;
+      if (nx > c.x0 - PLAYER.radius && nx < c.x1 + PLAYER.radius && nz > c.z0 - PLAYER.radius && nz < c.z1 + PLAYER.radius) {
+        const dxl = nx - (c.x0 - PLAYER.radius);
+        const dxr = (c.x1 + PLAYER.radius) - nx;
+        const dzl = nz - (c.z0 - PLAYER.radius);
+        const dzr = (c.z1 + PLAYER.radius) - nz;
+        const m = Math.min(dxl, dxr, dzl, dzr);
+        if (m === dxl) nx = c.x0 - PLAYER.radius;
+        else if (m === dxr) nx = c.x1 + PLAYER.radius;
+        else if (m === dzl) nz = c.z0 - PLAYER.radius;
+        else nz = c.z1 + PLAYER.radius;
       }
     }
-    if (!blocked) {
-      player.pos.x = nextX;
-      player.pos.z = nextZ;
-      player.pos.y = ground;
+  }
+  player.x = nx;
+  player.z = nz;
+  player.y = world.heightAt(nx, nz) ?? 0;
+  // Walk / run animation: the phase advances with distance, the swing and
+  // the lean grow when running.
+  if (player.moving) {
+    player.phase += speed * dt * (player.running ? 1.9 : 1.35);
+  }
+  const amp = player.running ? 0.95 : 0.5;
+  const lean = player.running ? 0.16 : 0.03;
+  animatePerson(player.group, player.phase, amp, lean);
+  player.group.position.set(player.x, player.y, player.z);
+  // The person's face is +Z, but the physics forward is (-sin h, -cos h)
+  // (the car's -Z convention), so the group turns by heading + PI to
+  // face the direction it moves and shoots.
+  player.group.rotation.y = player.heading + Math.PI;
+  if (player.fireCooldown > 0) player.fireCooldown -= dt;
+  // Show the current gun.
+  for (const [id, gun] of Object.entries(player.guns)) {
+    gun.visible = Number(id) === player.weapon;
+  }
+}
+
+// Fire the current weapon. Returns an object describing what happened
+// (or null if the weapon is on cooldown / out of ammo).
+export function fireWeapon(player, police, world) {
+  const w = WEAPONS[player.weapon];
+  if (player.fireCooldown > 0) return null;
+  if (player.weapon !== 0 && player.ammo[player.weapon] <= 0) return { kind: 'empty' };
+  player.fireCooldown = w.rate;
+  if (player.weapon !== 0) player.ammo[player.weapon] -= 1;
+  // Hitscan from Kai's facing: the nearest police car inside the range
+  // and within a narrow cone takes the damage.
+  let hitCar = null;
+  let hitDist = Infinity;
+  const fx = -Math.sin(player.heading);
+  const fz = -Math.cos(player.heading);
+  for (const car of police.cars) {
+    const dx = car.x - player.x;
+    const dz = car.z - player.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > w.range || dist > hitDist) continue;
+    const dot = (dx * fx + dz * fz) / dist;
+    if (dot > 0.92) {
+      hitCar = car;
+      hitDist = dist;
     }
   }
-  player.heading = Math.atan2(-dx, -dz);
-  player.moving = true;
-  animateWalk(player, speed, dt);
-  player.mesh.position.copy(player.pos);
-  player.mesh.rotation.y = player.heading;
-  return true;
+  if (hitCar) {
+    hitCar.condition = Math.max(0, hitCar.condition - w.damage);
+    police.addHeat(WANTED.shotFired);
+    return { kind: 'hit', target: hitCar, dist: hitDist };
+  }
+  if (player.weapon !== 0) police.addHeat(WANTED.shotFired * 0.4);
+  return { kind: 'miss' };
 }
 
-function animateWalk(player, speed, dt) {
-  const { legL, legR, armL, armR, pistol } = player.parts;
-  if (pistol) pistol.visible = !!player.aiming;
-  // Aiming holds the pistol arm up no matter how many frames pass — the
-  // staged overlook shot depends on this, since the loop keeps running.
-  if (player.aiming) {
-    legL.rotation.x *= 0.8;
-    legR.rotation.x *= 0.8;
-    // Positive rotation.x swings the arm toward local -z (forward, where
-    // the face and pistol point). v1 used -1.35, which swung the arm
-    // BACKWARD behind the body, so the aim pose never read in the shot.
-    armR.rotation.x = 1.35;
-    armL.rotation.x = 0.7;
-    return;
+// ---------------------------------------------------------------------------
+// Pedestrians: strollers, joggers, and a crowd that flees at a run.
+// ---------------------------------------------------------------------------
+
+const CORNERS = [];
+for (const sx of [-240, -160, -80, 0, 80, 160, 240]) {
+  for (const sz of [-240, -160, -80, 0, 80, 160, 240]) {
+    CORNERS.push({ x: sx + 9, z: sz + 9 });
+    CORNERS.push({ x: sx - 9, z: sz - 9 });
   }
-  if (speed === 0) {
-    legL.rotation.x *= 0.8;
-    legR.rotation.x *= 0.8;
-    armL.rotation.x *= 0.8;
-    armR.rotation.x *= 0.8;
-    return;
-  }
-  player.walkPhase += dt * speed * 1.35;
-  const swing = Math.sin(player.walkPhase) * 0.55;
-  legL.rotation.x = swing;
-  legR.rotation.x = -swing;
-  armL.rotation.x = -swing * 0.8;
-  armR.rotation.x = swing * 0.8;
 }
 
-// --- Pedestrians ---------------------------------------------------------------
-const PED_OUTFITS = [
-  { shirt: 0xe88a7a, trousers: 0x2b2d42, skin: 0x8a5a3b, hair: 0x1a1a1a },
-  { shirt: 0x3fae9c, trousers: 0x5a4632, skin: 0xe8b88a, hair: 0x4a2f1a },
-  { shirt: 0x8a9bb0, trousers: 0x1b263b, skin: 0xc98e6b, hair: 0x777777 },
-  { shirt: 0xd9a441, trousers: 0x2b2d42, skin: 0x6b4f2a, hair: 0x1a1a1a },
-  { shirt: 0xf4f1de, trousers: 0x7a6a9b, skin: 0xe8b88a, hair: 0x2a1a0a },
-];
-
-export function createPedestrians(scene, world, random) {
-  const peds = [];
-  for (let i = 0; i < 22; i += 1) {
-    const outfit = random.pick(PED_OUTFITS);
-    const { group, legL, legR, armL, armR } = buildHuman(outfit);
-    const x = random.range(-280, 280);
-    const z = random.range(-280, 280);
-    group.position.set(x, 0, z);
-    scene.add(group);
-    peds.push({
-      pos: new THREE.Vector3(x, 0, z),
-      heading: random.range(0, Math.PI * 2),
-      mesh: group,
-      parts: { legL, legR, armL, armR },
-      walkPhase: random.range(0, 6),
-      speed: random.range(1.2, 2.4),
-      target: null,
-      fleeing: false,
-    });
+export class Pedestrians {
+  constructor(scene, world, rng, count = 24) {
+    this.world = world;
+    this.rng = rng;
+    this.peds = [];
+    for (let i = 0; i < count; i++) {
+      const isJogger = i < 6; // the first six are joggers: always running
+      const palette = {
+        shirt: SHIRT_COLORS[rng.int(0, SHIRT_COLORS.length - 1)],
+        pants: PANTS_COLORS[rng.int(0, PANTS_COLORS.length - 1)],
+        skin: SKIN_COLORS[rng.int(0, SKIN_COLORS.length - 1)],
+        hair: rng.pick([0x2b2d42, 0x4a2c1a, 0x8a8a8a, 0x1a1a1a]),
+      };
+      const group = makePerson(palette);
+      const corner = CORNERS[rng.int(0, CORNERS.length - 1)];
+      const ped = {
+        group,
+        x: corner.x + rng.range(-4, 4),
+        z: corner.z + rng.range(-4, 4),
+        heading: rng.range(0, Math.PI * 2),
+        target: CORNERS[rng.int(0, CORNERS.length - 1)],
+        speed: isJogger ? rng.range(4.2, 5.2) : rng.range(1.1, 1.8),
+        isJogger,
+        state: isJogger ? 'run' : 'walk',
+        phase: rng.range(0, Math.PI * 2),
+      };
+      group.position.set(ped.x, 0, ped.z);
+      scene.add(group);
+      this.peds.push(ped);
+    }
   }
-  return peds;
-}
-
-export function stepPedestrians(peds, dt, world, playerPos, wantedStars) {
-  const streets = [-240, -160, -80, 0, 80, 160, 240];
-  for (const ped of peds) {
-    const toPlayer = Math.hypot(playerPos.x - ped.pos.x, playerPos.z - ped.pos.z);
-    ped.fleeing = wantedStars >= 2 && toPlayer < 26;
-    if (!ped.target || Math.hypot(ped.target[0] - ped.pos.x, ped.target[1] - ped.pos.z) < 4) {
-      if (ped.fleeing) {
-        const away = Math.atan2(ped.pos.x - playerPos.x, ped.pos.z - playerPos.z);
-        ped.target = [ped.pos.x + Math.sin(away) * 40, ped.pos.z + Math.cos(away) * 40];
+  update(dt, player, wantedStars) {
+    for (const ped of this.peds) {
+      // Flee: wanted 2+ and the player close by -> run away from the player.
+      const dPlayer = Math.hypot(player.x - ped.x, player.z - ped.z);
+      const fleeing = wantedStars >= 2 && dPlayer < 26 && !ped.isJogger;
+      if (fleeing) {
+        ped.state = 'flee';
+        const away = Math.atan2(ped.x - player.x, ped.z - player.z);
+        ped.heading = away;
+        const speed = 5.0;
+        ped.x += -Math.sin(away) * speed * dt;
+        ped.z += -Math.cos(away) * speed * dt;
+        // Keep them on the island.
+        ped.x = clamp(ped.x, -315, 315);
+        ped.z = clamp(ped.z, -315, 315);
+        ped.phase += speed * dt * 1.9;
+        animatePerson(ped.group, ped.phase, 0.95, 0.18);
+      } else if (ped.isJogger) {
+        ped.state = 'run';
+        this.walkToward(ped, dt, ped.speed, 0.95, 0.16);
       } else {
-        // Wander to a nearby street corner.
-        ped.target = [ped.pos.x + (Math.random() - 0.5) * 90, streets[Math.floor(Math.random() * streets.length)]];
+        ped.state = 'walk';
+        this.walkToward(ped, dt, ped.speed, 0.5, 0.03);
       }
+      ped.group.position.set(ped.x, 0, ped.z);
+      // Face the direction of travel (the person's face is +Z, the
+      // physics forward is (-sin h, -cos h), so +PI).
+      ped.group.rotation.y = ped.heading + Math.PI;
     }
-    const dx = ped.target[0] - ped.pos.x;
-    const dz = ped.target[1] - ped.pos.z;
-    const dist = Math.hypot(dx, dz) || 1;
-    const speed = ped.fleeing ? ped.speed * 2.6 : ped.speed;
-    const nx = ped.pos.x + (dx / dist) * speed * dt;
-    const nz = ped.pos.z + (dz / dist) * speed * dt;
-    const ground = world.heightAt(nx, nz);
-    if (ground !== null && ground < 8) {
-      ped.pos.x = nx;
-      ped.pos.z = nz;
-      ped.pos.y = ground;
+  }
+  walkToward(ped, dt, speed, amp, lean) {
+    const dx = ped.target.x - ped.x;
+    const dz = ped.target.z - ped.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 3) {
+      ped.target = CORNERS[this.rng.int(0, CORNERS.length - 1)];
+      return;
     }
-    ped.heading = Math.atan2(dx, dz);
-    ped.walkPhase += dt * speed * 1.5;
-    const swing = Math.sin(ped.walkPhase) * 0.5;
-    ped.parts.legL.rotation.x = swing;
-    ped.parts.legR.rotation.x = -swing;
-    ped.parts.armL.rotation.x = -swing * 0.7;
-    ped.parts.armR.rotation.x = swing * 0.7;
-    ped.mesh.position.copy(ped.pos);
-    ped.mesh.rotation.y = ped.heading;
+    const want = Math.atan2(-dx, -dz);
+    let dh = want - ped.heading;
+    while (dh > Math.PI) dh -= Math.PI * 2;
+    while (dh < -Math.PI) dh += Math.PI * 2;
+    ped.heading += clamp(dh, -2.4 * dt, 2.4 * dt);
+    ped.x += -Math.sin(ped.heading) * speed * dt;
+    ped.z += -Math.cos(ped.heading) * speed * dt;
+    ped.phase += speed * dt * 1.35;
+    animatePerson(ped.group, ped.phase, amp, lean);
   }
 }

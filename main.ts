@@ -5,6 +5,10 @@
 // file, copies them into the output directory, and writes
 // output/dossier.json through the vendored make.fun library so the
 // judge can read the game from the dossier.
+// v3: game/ also carries the real models (GLB cars, BlenderKit hero
+// buildings, the OSM block, Asphalt025C PBR) under game/assets/ —
+// plain files, copied like everything else, no build step.
+
 //
 // To run it outside the grader:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts

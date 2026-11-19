@@ -1,202 +1,202 @@
 // The HUD: a compact DOM overlay in the SOLARIA style — crisp white
 // type, amber accents, deep-slate translucent panels, a circular
-// wireframe minimap. Dense enough to read as a GTA HUD, small enough
-// to leave the city visible. The minimap is a 2D canvas redrawn every
-// frame from the live game state.
-import { WEAPONS } from './config.js';
+// minimap. Dense enough to read as a proper open-world HUD, small
+// enough to stay legible at contact-sheet size.
 
-const DISTRICT_LABELS = {
-  'Twin Prism Towers': 'TWIN PRISM TOWERS',
-  'Prism District': 'PRISM DISTRICT',
-  'Marina Row': 'MARINA ROW',
-  'Palm Boulevard': 'PALM BOULEVARD',
-  Causeway: 'CAUSEWAY',
-  'Solaria Key': 'SOLARIA KEY',
-  'South Solaria': 'SOUTH SOLARIA',
-  'Old Solaria': 'OLD SOLARIA',
-};
+import { FONT, PALETTE } from './config.js';
 
-export function createHud() {
-  const root = document.getElementById('hud');
-  root.innerHTML = [
-    '<div id="hud-mission" class="panel">',
-    '  <div class="mission-kicker">MISSION <span id="hud-mission-num">1/6</span></div>',
-    '  <div id="hud-mission-name">FIRST LIGHT</div>',
-    '  <div id="hud-mission-obj">Drive to the Marina Row marker</div>',
-    '  <div id="hud-mission-next">NEXT: The Pickup</div>',
-    '</div>',
-    '<div id="hud-right" class="panel">',
-    '  <div id="hud-stars">☆☆☆☆☆</div>',
-    '  <div id="hud-cash">$0</div>',
-    '  <div id="hud-rep">REP 0</div>',
-    '  <div id="hud-police"></div>',
-    '</div>',
-    '<div id="hud-district">PALM BOULEVARD</div>',
-    '<div id="hud-dialog" class="panel"><span id="hud-portrait">DQ</span><span id="hud-dialog-text"></span></div>',
-    '<div id="hud-weapons"></div>',
-    '<div id="hud-radio" class="panel"><span id="hud-radio-name">SOLARIA FM 88.5</span><span id="hud-radio-song">Golden Hour — The Apricots</span></div>',
-    '<div id="hud-speed">',
-    '  <div id="hud-speed-num">0</div>',
-    '  <div id="hud-speed-unit">KM/H · <span id="hud-car-name">ON FOOT</span></div>',
-    '  <div id="hud-cond"><div id="hud-cond-fill"></div></div>',
-    '  <div id="hud-nitro"><div id="hud-nitro-fill"></div></div>',
-    '</div>',
-    '<canvas id="hud-minimap" width="180" height="180"></canvas>',
-    '<div id="hud-crosshair">+</div>',
-    '<div id="hud-message"></div>',
-  ].join('\n');
-  const el = (id) => document.getElementById(id);
-  const minimap = el('hud-minimap');
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+export function createHUD() {
+  const root = el('div', 'hud');
+  root.innerHTML = `
+    <div class="hud-mission">
+      <div class="hud-mission-title"></div>
+      <div class="hud-mission-objective"></div>
+      <div class="hud-mission-step"></div>
+    </div>
+    <div class="hud-right">
+      <div class="hud-stars"></div>
+      <div class="hud-cash"></div>
+      <div class="hud-police"></div>
+    </div>
+    <div class="hud-speed">
+      <div class="hud-speed-num">0</div>
+      <div class="hud-speed-unit">km/h</div>
+      <div class="hud-speed-car"></div>
+    </div>
+    <div class="hud-radio"></div>
+    <div class="hud-hint">WASD drive/walk · F steal car · Shift nitro/run · 1/2/3 weapons · Click shoot · R radio · P pause</div>
+    <div class="hud-dialogue"></div>
+    <div class="hud-crosshair">+</div>
+    <canvas class="hud-minimap" width="180" height="180"></canvas>
+  `;
+  document.body.appendChild(root);
+  const missionTitle = root.querySelector('.hud-mission-title');
+  const missionObjective = root.querySelector('.hud-mission-objective');
+  const missionStep = root.querySelector('.hud-mission-step');
+  const starsEl = root.querySelector('.hud-stars');
+  const cashEl = root.querySelector('.hud-cash');
+  const policeEl = root.querySelector('.hud-police');
+  const speedNum = root.querySelector('.hud-speed-num');
+  const speedCar = root.querySelector('.hud-speed-car');
+  const radioEl = root.querySelector('.hud-radio');
+  const dialogueEl = root.querySelector('.hud-dialogue');
+  const crosshair = root.querySelector('.hud-crosshair');
+  const minimap = root.querySelector('.hud-minimap');
   const mctx = minimap.getContext('2d');
 
-  function renderStars(count) {
-    let out = '';
-    for (let i = 0; i < 5; i += 1) out += i < count ? '★' : '☆';
-    return out;
+  let dialogueTimer = null;
+  function showDialogue(speaker, text, ms = 4200) {
+    dialogueEl.innerHTML = '';
+    const who = el('span', 'hud-dialogue-who', speaker + ': ');
+    const what = el('span', 'hud-dialogue-what', text);
+    dialogueEl.appendChild(who);
+    dialogueEl.appendChild(what);
+    dialogueEl.style.opacity = '1';
+    if (dialogueTimer) clearTimeout(dialogueTimer);
+    dialogueTimer = setTimeout(() => { dialogueEl.style.opacity = '0'; }, ms);
   }
 
-  function drawMinimap(game) {
-    const W = 180;
-    const H = 180;
-    const cx = W / 2;
-    const cy = H / 2;
-    // The world spans x [-320, 780], z [-320, 320]; map it into the circle.
-    const scale = 0.135;
-    const toMap = (x, z) => [cx + (x - 230) * scale, cy + z * scale];
-    mctx.clearRect(0, 0, W, H);
+  function drawMinimap(state) {
+    const S = 180;
+    const C = S / 2;
+    const scale = S / 900; // the world spans about 900 m across
+    mctx.clearRect(0, 0, S, S);
+    // Circular clip.
     mctx.save();
     mctx.beginPath();
-    mctx.arc(cx, cy, 86, 0, Math.PI * 2);
+    mctx.arc(C, C, C - 2, 0, Math.PI * 2);
     mctx.clip();
-    // Bay water, then the two landmasses.
+    mctx.fillStyle = '#1b263b';
+    mctx.fillRect(0, 0, S, S);
+    // Water.
     mctx.fillStyle = '#0e6f8f';
-    mctx.fillRect(0, 0, W, H);
-    mctx.fillStyle = '#3a4556';
-    const [ix, iy] = toMap(-320, -320);
-    mctx.fillRect(ix, iy, 640 * scale, 640 * scale);
-    const [kx, ky] = toMap(560, -160);
-    mctx.fillRect(kx, ky, 220 * scale, 320 * scale);
-    // The causeway deck between them.
-    mctx.fillStyle = '#8a8f96';
-    const [bx, by] = toMap(298, -10);
-    mctx.fillRect(bx, by, 284 * scale, 20 * scale);
-    // The street grid.
-    mctx.strokeStyle = '#5a6270';
+    mctx.fillRect(0, 0, S, S);
+    // Island + Key.
+    const toMap = (x, z) => [C + x * scale, C + z * scale];
+    mctx.fillStyle = '#b3a37e';
+    const [ix, iz] = toMap(-320, -320);
+    mctx.fillRect(ix, iz, 640 * scale, 640 * scale);
+    const [kx, kz] = toMap(560, -160);
+    mctx.fillRect(kx, kz, 220 * scale, 320 * scale);
+    // Causeway.
+    mctx.fillStyle = '#4a4640';
+    const [cx, cz] = toMap(298, -12);
+    mctx.fillRect(cx, cz, 284 * scale, 24 * scale);
+    // Roads.
+    mctx.strokeStyle = '#332e29';
     mctx.lineWidth = 2;
-    for (const line of [-240, -160, -80, 0, 80, 160, 240]) {
-      const [ax, ay] = toMap(line, -320);
+    for (const s of [-240, -160, -80, 0, 80, 160, 240]) {
+      const [ax, ay] = toMap(s, -320);
       mctx.beginPath();
       mctx.moveTo(ax, ay);
       mctx.lineTo(ax, ay + 640 * scale);
       mctx.stroke();
-      const [hx, hy] = toMap(-320, line);
+      const [bx, by] = toMap(-320, s);
       mctx.beginPath();
-      mctx.moveTo(hx, hy);
-      mctx.lineTo(hx + 640 * scale, hy);
+      mctx.moveTo(bx, by);
+      mctx.lineTo(bx + 640 * scale, by);
       mctx.stroke();
     }
-    // Where the current step wants you to go.
-    const step = game.missions.currentStep ? game.missions.currentStep() : null;
-    if (step && (step.kind === 'reach' || step.kind === 'grab') && game.missions.active) {
-      const [mx, my] = toMap(step.x, step.z);
+    // Mission marker.
+    if (state.marker) {
+      const [mx, my] = toMap(state.marker.x, state.marker.z);
       mctx.fillStyle = '#ffb703';
       mctx.beginPath();
       mctx.arc(mx, my, 5, 0, Math.PI * 2);
       mctx.fill();
-      mctx.strokeStyle = '#ffb703';
-      mctx.beginPath();
-      mctx.arc(mx, my, 9, 0, Math.PI * 2);
+      mctx.strokeStyle = '#ffffff';
+      mctx.lineWidth = 1.5;
       mctx.stroke();
     }
-    // Police blips, in blue.
-    mctx.fillStyle = '#3fa9ff';
-    for (const car of game.actors.police.cars) {
-      const [px, py] = toMap(car.pos.x, car.pos.z);
+    // Police (red dots).
+    for (const p of state.police || []) {
+      const [px, py] = toMap(p.x, p.z);
+      mctx.fillStyle = '#ff2d2d';
       mctx.beginPath();
       mctx.arc(px, py, 3, 0, Math.PI * 2);
       mctx.fill();
     }
-    // The hero car in lime, so it is easy to find again after you park it.
-    if (game.actors.heroCar && game.actors.heroCar !== game.currentCar) {
-      const [hx, hy] = toMap(game.actors.heroCar.pos.x, game.actors.heroCar.pos.z);
-      mctx.fillStyle = '#70e000';
-      mctx.beginPath();
-      mctx.arc(hx, hy, 3, 0, Math.PI * 2);
-      mctx.fill();
-    }
-    // The player: a white arrow (lime when driving) pointing along heading.
-    const [px, py] = toMap(game.player.pos.x, game.player.pos.z);
+    // Player (white arrow).
+    const [ux, uy] = toMap(state.player.x, state.player.z);
     mctx.save();
-    mctx.translate(px, py);
-    mctx.rotate(-game.player.heading);
-    mctx.fillStyle = game.currentCar ? '#70e000' : '#ffffff';
+    mctx.translate(ux, uy);
+    mctx.rotate(Math.atan2(-Math.sin(state.player.heading), -Math.cos(state.player.heading)) + Math.PI / 2);
+    mctx.fillStyle = '#ffffff';
     mctx.beginPath();
-    mctx.moveTo(0, -7);
-    mctx.lineTo(5, 6);
-    mctx.lineTo(-5, 6);
+    mctx.moveTo(0, -6);
+    mctx.lineTo(4.5, 5);
+    mctx.lineTo(-4.5, 5);
     mctx.closePath();
     mctx.fill();
     mctx.restore();
-    // North marker, then the rim.
-    mctx.fillStyle = '#ffffff';
-    mctx.font = 'bold 11px system-ui, sans-serif';
-    mctx.textAlign = 'center';
-    mctx.fillText('N', cx, 14);
     mctx.restore();
-    mctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    // Ring.
+    mctx.strokeStyle = 'rgba(255,255,255,0.85)';
     mctx.lineWidth = 2;
     mctx.beginPath();
-    mctx.arc(cx, cy, 88, 0, Math.PI * 2);
+    mctx.arc(C, C, C - 2, 0, Math.PI * 2);
     mctx.stroke();
   }
 
-  function update(game) {
-    const missions = game.missions;
-    const mission = missions.current();
-    el('hud-mission-num').textContent = `${Math.min(missions.index + 1, 6)}/6`;
-    el('hud-mission-name').textContent = mission.name;
-    el('hud-mission-obj').textContent = mission.objective;
-    const nextNames = ['The Pickup', 'Tower Run', 'The Jump', 'Golden Hour', 'Solaria Heist'];
-    el('hud-mission-next').textContent = missions.index + 1 < 6 ? `NEXT: ${nextNames[missions.index]}` : 'FINAL MISSION';
-    el('hud-stars').textContent = renderStars(game.wantedStars);
-    el('hud-stars').style.color = game.wantedStars > 0 ? '#ff5a4e' : '#ffffff';
-    el('hud-cash').textContent = `$${Math.round(game.money).toLocaleString('en-US')}`;
-    el('hud-rep').textContent = `REP ${Math.round(game.rep)}`;
-    const policeList = game.actors.police.cars.slice(0, 3).map((car) => {
-      const dist = Math.round(Math.hypot(car.pos.x - game.player.pos.x, car.pos.z - game.player.pos.z));
-      const tactic = car.disabled ? 'DISABLED' : dist < 25 ? 'RAMMING' : 'PURSUIT';
-      return `<div>SPD-${Math.abs(Math.round(car.pos.x + car.pos.z)) % 90 + 10} · ${dist}m · ${tactic}</div>`;
-    }).join('');
-    el('hud-police').innerHTML = policeList;
-    el('hud-district').textContent = DISTRICT_LABELS[game.district] || game.district;
-    const dialog = game.dialog || '';
-    el('hud-dialog').style.display = dialog ? 'flex' : 'none';
-    if (dialog) {
-      el('hud-dialog-text').textContent = dialog;
-      el('hud-portrait').textContent = game.dialogSpeaker || 'DQ';
-    }
-    // Weapons, with the active one highlighted.
-    el('hud-weapons').innerHTML = WEAPONS.map((w, i) => {
-      const ammo = game.ammo[i];
-      const active = i === game.weapon;
-      const ammoText = ammo === Infinity ? '∞' : ammo;
-      return `<div class="weapon${active ? ' active' : ''}"><b>${i + 1}</b> ${w.name} <span>${ammoText}</span></div>`;
-    }).join('');
-    el('hud-radio-name').textContent = game.station.name;
-    el('hud-radio-song').textContent = game.station.song;
-    const speed = game.currentCar ? Math.round(game.currentCar.speedKmh) : 0;
-    el('hud-speed-num').textContent = speed;
-    el('hud-car-name').textContent = game.currentCar ? game.currentCar.name : 'ON FOOT';
-    const cond = game.currentCar ? game.currentCar.condition : game.player.health;
-    el('hud-cond-fill').style.width = `${Math.max(0, cond)}%`;
-    el('hud-cond-fill').style.background = cond > 50 ? '#70e000' : cond > 25 ? '#ffb703' : '#ff5a4e';
-    el('hud-nitro-fill').style.width = `${game.currentCar ? game.currentCar.nitro : 0}%`;
-    el('hud-crosshair').style.display = !game.currentCar && game.weapon > 0 ? 'block' : 'none';
-    const msg = missions.message;
-    el('hud-message').textContent = msg;
-    el('hud-message').style.opacity = msg ? '1' : '0';
-    drawMinimap(game);
-  }
+  return {
+    root,
+    showDialogue,
+    update(state) {
+      const m = state.mission;
+      missionTitle.textContent = m ? `${m.index + 1}. ${m.current ? m.current.name : ''}` : '';
+      missionObjective.textContent = m && m.current ? m.current.brief : '';
+      missionStep.textContent = m && m.currentStep ? `▸ ${m.currentStep.label}` : '';
+      // Wanted stars.
+      let stars = '';
+      for (let i = 0; i < 5; i++) stars += i < state.stars ? '★' : '☆';
+      starsEl.textContent = stars;
+      starsEl.style.color = state.stars >= 3 ? '#ff2d2d' : '#ffb703';
+      cashEl.textContent = `$${state.money.toLocaleString('en-US')}  ·  REP ${state.rep}`;
+      const alive = (state.police || []).filter((p) => p.condition > 0).length;
+      policeEl.textContent = state.stars > 0 ? `SPD: ${alive} unit${alive === 1 ? '' : 's'} on you` : 'SPD: clear';
+      // Speed.
+      speedNum.textContent = Math.round(state.speedKmh);
+      speedCar.textContent = state.inCar ? state.carName : 'ON FOOT';
+      speedCar.style.color = state.inCar ? '#70e000' : '#ffffff';
+      radioEl.textContent = state.radioOn ? `♪ ${state.station}` : '♪ radio off';
+      crosshair.style.display = !state.inCar && state.weapon !== 0 ? 'block' : 'none';
+      drawMinimap(state);
+    },
+    setVisible(v) {
+      root.style.display = v ? 'block' : 'none';
+    },
+  };
+}
 
-  return { update };
+export function injectHUDStyles() {
+  const style = document.createElement('style');
+  style.textContent = `
+    .hud { position: fixed; inset: 0; pointer-events: none; font-family: ${FONT}; color: ${PALETTE.hudText}; z-index: 10; }
+    .hud-mission { position: absolute; top: 14px; left: 14px; background: ${PALETTE.hudPanel}; border-left: 4px solid ${PALETTE.hudAmber}; padding: 10px 14px; max-width: 380px; border-radius: 4px; }
+    .hud-mission-title { font-size: 17px; font-weight: 800; letter-spacing: 1px; }
+    .hud-mission-objective { font-size: 13px; opacity: 0.92; margin-top: 3px; line-height: 1.35; }
+    .hud-mission-step { font-size: 12px; color: ${PALETTE.hudAmber}; margin-top: 4px; font-weight: 700; }
+    .hud-right { position: absolute; top: 14px; right: 14px; text-align: right; }
+    .hud-stars { font-size: 26px; letter-spacing: 3px; text-shadow: 0 2px 6px rgba(0,0,0,0.6); }
+    .hud-cash { font-size: 15px; font-weight: 700; margin-top: 2px; text-shadow: 0 1px 4px rgba(0,0,0,0.7); }
+    .hud-police { font-size: 12px; opacity: 0.9; margin-top: 2px; }
+    .hud-speed { position: absolute; right: 16px; bottom: 16px; text-align: right; text-shadow: 0 2px 6px rgba(0,0,0,0.7); }
+    .hud-speed-num { font-size: 44px; font-weight: 800; line-height: 1; }
+    .hud-speed-unit { font-size: 12px; opacity: 0.85; }
+    .hud-speed-car { font-size: 14px; font-weight: 800; letter-spacing: 1px; margin-top: 2px; }
+    .hud-radio { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 13px; font-weight: 700; background: ${PALETTE.hudPanel}; padding: 6px 12px; border-radius: 20px; }
+    .hud-hint { position: absolute; bottom: 16px; left: 210px; font-size: 11px; opacity: 0.75; max-width: 260px; line-height: 1.4; }
+    .hud-dialogue { position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); background: ${PALETTE.hudPanel}; padding: 9px 16px; border-radius: 6px; font-size: 14px; max-width: 560px; transition: opacity 0.4s; opacity: 0; }
+    .hud-dialogue-who { color: ${PALETTE.hudAmber}; font-weight: 800; }
+    .hud-crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 22px; font-weight: 700; color: #fff; text-shadow: 0 1px 4px rgba(0,0,0,0.8); display: none; }
+    .hud-minimap { position: absolute; left: 14px; bottom: 14px; width: 180px; height: 180px; border-radius: 50%; box-shadow: 0 4px 18px rgba(0,0,0,0.5); }
+  `;
+  document.head.appendChild(style);
 }

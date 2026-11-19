@@ -1,563 +1,517 @@
 // SOLARIA BAY — boot and the single game loop. Each frame the loop reads
 // input, steps the world forward in fixed 1/60 s slices, and paints the
 // result. Five screens: title, play, paused, victory, busted. With
-// ?shot=drawbridge|boulevard|overlook|pursuit (and &seed=N) the page
-// stages that scene instead of running the loop, paints it twice, and
-// sets window.__shotReady so a screenshot can be taken.
+// ?shot=drawbridge|boulevard|overlook|pursuit the page instead stages
+// one screenshot scene, paints it twice, and sets window.__shotReady.
+//
+// The boot is async: the real GLB assets (hero car, buildings, the
+// fleet) load first, then the world is built from them, then the game
+// starts. If the assets fail to load, the error is reported on screen
+// and on window.__solariaError instead of a black page.
+
 import * as THREE from 'three';
-import { HERO_CAR, MISSIONS, SAVE_KEY, STEP, WANTED, WEAPONS } from './config.js';
+import { STEP, WORLD, MISSIONS, SAVE_KEY, HERO_CAR, WANTED } from './config.js';
 import { createRandom } from './random.js';
+import { loadGameAssets } from './assets.js';
 import { buildWorld } from './city.js';
-import { createCar, createHelicopter, createPolice, createTraffic, stepCar, stepTraffic } from './vehicles.js';
-import { createPedestrians, createPlayer, stepPedestrians, stepPlayer } from './characters.js';
-import { createMissions } from './missions.js';
+import { makeCar, driveCar, Traffic, Police } from './vehicles.js';
+import { createPlayer, stepPlayer, fireWeapon, Pedestrians } from './characters.js';
+import { createMissions, updateMissions, DIALOGUE } from './missions.js';
+import { createRenderer, createCamera, updateCamera, resizeRenderer } from './render.js';
+import { createHUD, injectHUDStyles } from './hud.js';
+import { createInput } from './input.js';
 import { createAudio } from './audio.js';
-import { createHud } from './hud.js';
-import { ACTION_CONFIRM, ACTION_ENTER, ACTION_MUTE, ACTION_PAUSE, ACTION_RADIO, ACTION_WEAPON_NEXT, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_VICTORY } from './render.js';
-import { stageShot } from './shots.js';
+import { SHOTS } from './shots.js';
 
-const MAX_FRAME = 0.25; // a hitching frame never advances the sim by more than this
+const PAYOUTS = [800, 1200, 1500, 2500, 2000, 15000];
 
-const query = new URLSearchParams(window.location.search);
-const shotName = query.get('shot');
-const seedRaw = Number.parseInt(query.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedRaw) ? seedRaw : Math.floor(Math.random() * 4294967296);
-
-const canvas = document.getElementById('game');
-const statusLine = document.getElementById('status');
-const renderer = createRenderer(canvas);
-const random = createRandom(seed);
-const world = buildWorld(renderer.scene, random);
-const audio = createAudio();
-const hud = createHud();
-
-// --- The cast: the player, the parked cars, traffic, police, helicopter, pedestrians, missions ---
-const player = createPlayer(renderer.scene);
-const parked = [];
-function park(kind, spec, x, z, heading, name, hero = false) {
-  const car = createCar(kind, spec, x, z, heading, name);
-  car.hero = hero;
-  renderer.scene.add(car.mesh);
-  parked.push(car);
-  return car;
+function params() {
+  const q = new URLSearchParams(window.location.search);
+  return {
+    shot: q.get('shot'),
+    seed: q.get('seed') ? Number(q.get('seed')) : (Math.random() * 1e9) | 0,
+  };
 }
-// The hero GT waits at the marina, first in the list, so it is the first
-// car a new player finds.
-const heroCar = park('hero', HERO_CAR, -116, 286, 0.6, HERO_CAR.name, true);
-park('traffic', { color: 0xe8e4d8, topSpeedKmh: 96 }, -80, 44, 0, 'CORAL SEDAN');
-park('traffic', { color: 0x3fae9c, topSpeedKmh: 102 }, 80, -44, Math.PI, 'PALM COUPE');
-park('traffic', { color: 0xd9a441, topSpeedKmh: 88 }, -160, 84, -Math.PI / 2, 'SANDY HATCH');
-park('traffic', { color: 0x8a9bb0, topSpeedKmh: 110 }, 240, 160, Math.PI, 'BAY CRUISER');
-const traffic = createTraffic(world, random);
-for (const car of traffic) renderer.scene.add(car.mesh);
-const police = createPolice(renderer.scene);
-const heli = createHelicopter(renderer.scene);
-const peds = createPedestrians(renderer.scene, world, random);
-const missions = createMissions(world);
 
-// --- The one game object: everything the loop, the HUD and the debug handle read ---
-const game = {
-  state: SCREEN_TITLE,
-  money: 1200,
-  rep: 0,
-  heat: 0,
-  wantedStars: 0,
-  hasGold: false,
-  weapon: 0,
-  ammo: [Infinity, WEAPONS[1].ammo, WEAPONS[2].ammo],
-  currentCar: null,
-  player,
-  missions,
-  actors: { police, heli, parked, traffic, peds, heroCar },
-  district: 'Palm Boulevard',
-  dialog: '',
-  dialogSpeaker: 'DQ',
-  station: audio.station,
-  world,
-  lastCrimeAt: -99,
-  elapsed: 0,
-  lastShotAt: -99,
-  time: 0,
-};
-
-// --- Saves: money, rep, mission and the gold case, in localStorage ------------
 function loadSave() {
   try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(SAVE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
-function storeSave() {
+
+function writeSave(save) {
   try {
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      money: game.money,
-      rep: game.rep,
-      mission: missions.index,
-      hasGold: game.hasGold,
-    }));
+    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
   } catch {
-    // Storage can be off: the save then lasts this visit only.
+    // Storage full or blocked: the game still runs, it just won't save.
   }
 }
 
-// --- Dialogue: what Dara and Kai say, and when ----------------------------------
-const DIALOG = {
-  start: [
-    ['DARA: Kai Solano, back in Solaria Bay at last. The GT is waiting at the marina. Go get it.', 'DQ'],
-    ['KAI: Five years away and the city still smells like salt and gasoline.', 'KS'],
-  ],
-  mission: [
-    ['DARA: Nice. Now cross town — the Towers are watching, and so is the SPD.', 'DQ'],
-    ['DARA: The bridge is up. Thirty metres of nothing. Do not lift, Kai.', 'DQ'],
-    ['DARA: Go quiet. No sirens, no speeding. Let the heat die down.', 'DQ'],
-    ['DARA: The vault, the gold, the bridge home. This is the one, Kai.', 'DQ'],
-  ],
-};
+async function boot() {
+  const { shot, seed } = params();
+  const rng = createRandom(seed);
+  const canvas = document.getElementById('game');
+  const errorBox = document.getElementById('error');
+  window.__solariaError = null;
 
-function say(text, speaker) {
-  game.dialog = text;
-  game.dialogSpeaker = speaker;
-}
-
-// --- Wanted: heat in, stars out --------------------------------------------------
-function addHeat(amount) {
-  game.heat = Math.min(1000, game.heat + amount);
-  game.lastCrimeAt = game.elapsed;
-}
-
-function refreshWanted() {
-  const stars = game.heat <= 0 ? 0 : Math.min(WANTED.maxStars, Math.ceil(game.heat / WANTED.heatPerStar));
-  game.wantedStars = stars;
-  player.wantedStars = stars;
-}
-
-// --- Cars: getting in, getting out, and getting fished out of the bay --------
-function closestParked(maxDist) {
-  let best = null;
-  let bestDist = maxDist;
-  for (const car of parked) {
-    const d = Math.hypot(car.pos.x - player.pos.x, car.pos.z - player.pos.z);
-    if (d < bestDist) {
-      best = car;
-      bestDist = d;
+  // --- Screens (DOM overlays) -------------------------------------------------
+  const titleScreen = document.getElementById('title-screen');
+  const pauseScreen = document.getElementById('pause-screen');
+  const victoryScreen = document.getElementById('victory-screen');
+  const bustedScreen = document.getElementById('busted-screen');
+  const loadingScreen = document.getElementById('loading-screen');
+  const showOnly = (which) => {
+    for (const [el, name] of [[titleScreen, 'title'], [pauseScreen, 'pause'], [victoryScreen, 'victory'], [bustedScreen, 'busted'], [loadingScreen, 'loading']]) {
+      if (el) el.style.display = name === which ? 'flex' : 'none';
     }
-  }
-  return best;
-}
+  };
 
-function getIn() {
-  const car = closestParked(5);
-  if (!car) return false;
-  parked.splice(parked.indexOf(car), 1);
-  game.currentCar = car;
-  player.pos.copy(car.pos);
-  addHeat(WANTED.stealCar);
-  say(car.hero ? 'KAI: The GT. Still lime, still loud. Let\'s go.' : 'KAI: Borrowed. The owner will understand. Probably.', 'KS');
-  audio.pickup();
-  return true;
-}
-
-function getOut() {
-  const car = game.currentCar;
-  if (!car) return false;
-  game.currentCar = null;
-  const side = car.heading + Math.PI / 2;
-  player.pos.set(car.pos.x + Math.sin(side) * 3, car.pos.y, car.pos.z + Math.cos(side) * 3);
-  player.mesh.position.copy(player.pos);
-  parked.push(car);
-  return true;
-}
-
-function fishOut() {
-  // Fished out of the bay: back on the causeway deck, car and all,
-  // pointed east toward the bridge so the jump can be retried.
-  const car = game.currentCar;
-  if (car) {
-    car.pos.set(372, 0, 0);
-    car.speed = 0;
-    car.airborne = false;
-    car.vy = 0;
-    car.mesh.position.copy(car.pos);
-    car.mesh.rotation.y = -Math.PI / 2;
-    car.heading = -Math.PI / 2;
-    player.pos.copy(car.pos);
-  } else {
-    player.pos.set(372, 0, 0);
-    player.mesh.position.copy(player.pos);
-  }
-  say('DARA: Fished you out of the bay. The bridge is still up, Kai. Again.', 'DQ');
-}
-
-// --- Shooting: hitscan from the camera, on foot only ------------------------------
-function shoot() {
-  if (game.currentCar) return;
-  if (game.weapon === 0) return;
-  if (game.elapsed - game.lastShotAt < WEAPONS[game.weapon].rate) return;
-  if (game.ammo[game.weapon] <= 0) {
-    say('KAI: Out of ammo.', 'KS');
-    return;
-  }
-  game.lastShotAt = game.elapsed;
-  game.ammo[game.weapon] -= 1;
-  audio.shot();
-  addHeat(WANTED.shotFired);
-  // Hitscan: the nearest police car near the camera's aim takes the hit.
-  const aim = new THREE.Vector3();
-  renderer.camera.getWorldDirection(aim);
-  let target = null;
-  let targetScore = Infinity;
-  for (const car of police.cars) {
-    if (car.disabled) continue;
-    const to = new THREE.Vector3(car.pos.x - renderer.camera.position.x, 1 - renderer.camera.position.y, car.pos.z - renderer.camera.position.z);
-    const dist = to.length();
-    if (dist > WEAPONS[game.weapon].range) continue;
-    const angle = aim.angleTo(to.normalize());
-    const score = dist + angle * 120;
-    if (angle < 0.35 && score < targetScore) {
-      target = car;
-      targetScore = score;
+  let renderer;
+  let camera;
+  let scene;
+  let world;
+  let assets;
+  try {
+    renderer = createRenderer(canvas);
+    camera = createCamera();
+    camera.position.set(-40, 55, 402);
+    camera.lookAt(-280, 60, 0);
+    scene = new THREE.Scene();
+    assets = await loadGameAssets();
+    world = buildWorld(scene, assets, rng);
+  } catch (e) {
+    const msg = `Failed to load Solaria Bay: ${e && e.message ? e.message : e}`;
+    window.__solariaError = msg;
+    if (errorBox) {
+      errorBox.textContent = msg;
+      errorBox.style.display = 'block';
     }
+    if (loadingScreen) loadingScreen.style.display = 'none';
+    throw e;
   }
-  if (target) {
-    target.condition -= WEAPONS[game.weapon].damage;
-    if (target.condition <= 0) {
-      target.disabled = true;
-      game.rep += 2;
-      addHeat(40);
+
+  // --- The game objects ---------------------------------------------------------
+  const save = loadSave();
+  const player = createPlayer(scene, world);
+  const peds = new Pedestrians(scene, world, rng, 24);
+  const traffic = new Traffic(scene, assets, world, rng);
+  const police = new Police(scene, assets, world, rng);
+  const missions = createMissions();
+  const hud = createHUD();
+  injectHUDStyles();
+  const audio = createAudio();
+  const input = createInput(canvas);
+
+  // The hero GT, parked under the middle shade sail at the marina.
+  const heroCar = makeCar(assets, 'hero', world.heroSpawn.x, world.heroSpawn.z, world.heroSpawn.heading);
+  heroCar.isHero = true;
+  scene.add(heroCar.group);
+  // Parked cars the player can steal: the fire trucks, the ambulance,
+  // and a few ordinary cars left on the street.
+  const parkedCars = [];
+  const parkedSpecs = [
+    ['firePumper', 200, 200, Math.PI / 2],
+    ['fireLadder', 212, 200, Math.PI / 2],
+    ['ambulance', -200, -200, 0],
+    ['sedan', 80, 40, Math.PI / 2],
+    ['hatchback', -80, -40, 0],
+    ['van', 120, -120, Math.PI],
+  ];
+  for (const [key, x, z, heading] of parkedSpecs) {
+    const car = makeCar(assets, key, x, z, heading);
+    car.parked = true;
+    scene.add(car.group);
+    parkedCars.push(car);
+  }
+
+  // --- State ----------------------------------------------------------------------
+  const state = {
+    screen: shot ? 'play' : 'title',
+    money: save ? save.money || 0 : 0,
+    rep: save ? save.rep || 0 : 0,
+    hasGold: save ? !!save.hasGold : false,
+    playerCar: null, // the car Kai is driving, or null when on foot
+    gameOver: false,
+    time: 0,
+    camYaw: 0,
+  };
+  if (save && typeof save.mission === 'number' && save.mission > 0 && save.mission < MISSIONS.length) {
+    missions.index = save.mission;
+    missions.step = 0;
+  }
+
+  // The debug handle (used by the playtest and the shot driver).
+  window.__solaria = {
+    get state() { return state.screen; },
+    get money() { return state.money; },
+    get rep() { return state.rep; },
+    get heat() { return police.heat; },
+    get wantedStars() { return police.stars; },
+    get health() { return player.health; },
+    get hasGold() { return state.hasGold; },
+    get ammo() { return { ...player.ammo }; },
+    get currentCar() { return state.playerCar ? state.playerCar.key : null; },
+    get drivenCar() { return state.playerCar; },
+    get gameOver() { return state.gameOver; },
+    // Exposed for the performance tool: the renderer's info holds the
+    // real draw calls + triangles of the last rendered frame.
+    get rendererInfo() { return { ...renderer.info.render }; },
+    get peds() { return peds.peds; },
+    player,
+    world,
+    missions,
+    police,
+    traffic,
+    heroCar,
+    parkedCars,
+    playerSpeedKmh() {
+      return state.playerCar ? Math.abs(state.playerCar.speed) * 3.6 : 0;
+    },
+  };
+
+  // --- Dialogue + mission flow ------------------------------------------------------
+  let dialogueQueue = [];
+  function say(lines) {
+    dialogueQueue = lines.slice();
+  }
+  function pumpDialogue() {
+    if (dialogueQueue.length === 0) return;
+    const [who, text] = dialogueQueue.shift();
+    hud.showDialogue(who, text);
+  }
+  say(DIALOGUE.start);
+
+  function onMissionComplete() {
+    const finished = missions.index - 1;
+    const payout = PAYOUTS[finished] || 0;
+    state.money += payout;
+    state.rep += 10 + finished * 5;
+    audio.missionDone();
+    writeSave({ money: state.money, rep: state.rep, mission: missions.index, hasGold: state.hasGold });
+    const next = DIALOGUE[Object.keys(DIALOGUE)[missions.index]] || null;
+    if (next) say(next);
+  }
+
+  // --- Entering / leaving cars -------------------------------------------------------
+  function nearestStealable() {
+    const candidates = [heroCar, ...parkedCars];
+    let best = null;
+    let bestDist = 3.6;
+    for (const car of candidates) {
+      if (state.playerCar === car) continue;
+      const d = Math.hypot(car.x - player.x, car.z - player.z);
+      if (d < bestDist) {
+        best = car;
+        bestDist = d;
+      }
     }
+    return best;
   }
-}
-
-// --- Screens: the pause / victory / busted overlay ---------------------------------
-function showOverlay(show, kind) {
-  document.getElementById('overlay').style.display = show ? 'flex' : 'none';
-  if (!show) return;
-  document.getElementById('btn-resume').style.display = kind === 'pause' ? 'inline-block' : 'none';
-  document.getElementById('btn-retry').style.display = kind === 'busted' ? 'inline-block' : 'none';
-  document.getElementById('btn-keep').style.display = kind === 'victory' ? 'inline-block' : 'none';
-}
-
-function gameOver(reason) {
-  game.state = SCREEN_OVER;
-  document.getElementById('overlay-title').textContent = reason === 'busted' ? 'BUSTED' : 'WASTED';
-  document.getElementById('overlay-lines').innerHTML = reason === 'busted'
-    ? '<div>The SPD finally caught up with Kai Solano.</div><div>But Solaria Bay never forgets a driver.</div>'
-    : '<div>Kai Solano did not make it out of Solaria Bay.</div>';
-  document.getElementById('overlay-prompt').textContent = 'Press Enter or click TRY AGAIN';
-  showOverlay(true, 'busted');
-  audio.busted();
-  statusLine.textContent = 'Busted. Press Enter to try again.';
-}
-
-function startGame(fromSave) {
-  const save = fromSave ? loadSave() : null;
-  game.money = save ? save.money : 1200;
-  game.rep = save ? save.rep : 0;
-  game.hasGold = save ? !!save.hasGold : false;
-  game.heat = 0;
-  game.wantedStars = 0;
-  game.weapon = 0;
-  game.ammo = [Infinity, WEAPONS[1].ammo, WEAPONS[2].ammo];
-  player.health = 100;
-  player.pos.set(-60, 0, 40);
-  player.heading = Math.PI;
-  player.mesh.position.copy(player.pos);
-  if (game.currentCar) {
-    parked.push(game.currentCar);
-    game.currentCar = null;
+  function enterCar(car) {
+    state.playerCar = car;
+    car.parked = false;
+    player.group.visible = false;
+    if (car.key !== 'hero') police.addHeat(WANTED.stealCar);
+    audio.pickup();
   }
-  missions.start();
-  if (save && save.mission > 0) {
-    // Continue jumps straight to the first unfinished mission.
-    missions.skipTo(save.mission);
-  }
-  say(DIALOG.start[0][0], 'DQ');
-  game.state = SCREEN_PLAY;
-  document.getElementById('title').style.display = 'none';
-  showOverlay(false);
-  statusLine.textContent = 'Playing. Mission 1: First Light.';
-  audio.ensure();
-  audio.mission();
-}
-
-// --- The step: one fixed slice of simulation ------------------------------------------
-function step(dt) {
-  game.elapsed += dt;
-  game.time += dt;
-  missions.tickMessage(dt);
-
-  // Heat fades when the player has been quiet and no police are near.
-  let closestCop = Infinity;
-  for (const car of police.cars) {
-    closestCop = Math.min(closestCop, Math.hypot(car.pos.x - player.pos.x, car.pos.z - player.pos.z));
-  }
-  if (game.elapsed - game.lastCrimeAt > WANTED.decayDelay && closestCop > 55) {
-    game.heat = Math.max(0, game.heat - WANTED.decayPerSecond * dt);
-  }
-  refreshWanted();
-
-  // Traffic and pedestrians always move, even on the title screen.
-  stepTraffic(traffic, dt, world, game.currentCar);
-  stepPedestrians(peds, dt, world, player.pos, game.wantedStars);
-
-  if (game.state === SCREEN_TITLE) {
-    world.update(dt, game.time);
-    return;
-  }
-  if (game.state !== SCREEN_PLAY) {
-    world.update(dt, game.time);
-    return;
+  function exitCar() {
+    const car = state.playerCar;
+    if (!car) return;
+    state.playerCar = null;
+    // Kai steps out to the left of the car.
+    const lx = car.x + Math.cos(car.heading) * 1.6;
+    const lz = car.z - Math.sin(car.heading) * 1.6;
+    player.x = lx;
+    player.z = lz;
+    player.y = world.heightAt(lx, lz) ?? 0;
+    player.group.position.set(player.x, player.y, player.z);
+    player.group.visible = true;
+    car.parked = true;
+    if (!parkedCars.includes(car) && car.key !== 'hero') parkedCars.push(car);
   }
 
-  const input = game.input;
-  const driveAxes = input.drive();
-  const walkAxes = input.walk();
+  // --- Shooting (mouse click) ---------------------------------------------------------
+  let shootQueued = false;
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0 && state.screen === 'play' && !state.playerCar) shootQueued = true;
+  });
 
-  if (game.currentCar) {
-    const event = stepCar(game.currentCar, driveAxes, dt, world);
-    player.pos.copy(game.currentCar.pos);
-    player.heading = game.currentCar.heading;
-    if (event === 'splash') fishOut();
-    else if (event === 'jump') {
-      addHeat(30);
-      say('KAI: Airborne! Hold it steady...', 'KS');
+  // --- The fixed-step update ------------------------------------------------------------
+  function step(dt) {
+    state.time += dt;
+    const inCar = !!state.playerCar;
+    // --- Input: pause / radio / weapons / steal --------------------------------------
+    if (input.consume('KeyP') || input.consume('Escape')) {
+      if (state.screen === 'play') {
+        state.screen = 'pause';
+        showOnly('pause');
+      } else if (state.screen === 'pause') {
+        state.screen = 'play';
+        showOnly(null);
+      }
     }
-    // Shove traffic cars the player pushes into.
-    for (const bystander of traffic) {
-      const d = Math.hypot(bystander.pos.x - game.currentCar.pos.x, bystander.pos.z - game.currentCar.pos.z);
-      if (d < 4.4 && d > 0.01) {
-        const push = (4.4 - d) / 2;
-        const nx = (bystander.pos.x - game.currentCar.pos.x) / d;
-        const nz = (bystander.pos.z - game.currentCar.pos.z) / d;
-        bystander.pos.x += nx * push;
-        bystander.pos.z += nz * push;
-        if (Math.abs(game.currentCar.speed) > 8) {
-          bystander.condition = Math.max(0, bystander.condition - 20);
-          if (bystander.condition <= 0) bystander.disabled = true;
-          game.currentCar.condition = Math.max(0, game.currentCar.condition - 2);
+    if (state.screen !== 'play') return;
+    if (input.consume('KeyR')) {
+      const name = audio.cycleStation();
+      hud.showDialogue('RADIO', name);
+    }
+    if (input.consume('Digit1')) player.weapon = 0;
+    if (input.consume('Digit2')) player.weapon = 1;
+    if (input.consume('Digit3')) player.weapon = 2;
+    if (input.consume('KeyF')) {
+      if (inCar) exitCar();
+      else {
+        const car = nearestStealable();
+        if (car) enterCar(car);
+      }
+    }
+
+    // --- Player or car ------------------------------------------------------------------
+    if (state.playerCar) {
+      const car = state.playerCar;
+      const controls = input.drive();
+      const event = driveCar(car, dt, controls, world, car.spec.topSpeedKmh, car.spec.accel);
+      if (event === 'splash') {
+        // Fished out: back on the causeway approach, car a little worse.
+        car.x = 372;
+        car.z = 0;
+        car.y = WORLD.deckY;
+        car.heading = Math.PI / 2;
+        car.speed = 0;
+        car.vy = 0;
+        car.airborne = false;
+        car.condition = Math.max(20, car.condition - 15);
+        audio.crash();
+      } else if (event === 'crash') {
+        audio.crash();
+      } else if (event === 'jump') {
+        hud.showDialogue('KAI', 'Flying!');
+      }
+      // Speeding past the police adds heat.
+      if (Math.abs(car.speed) * 3.6 > 120) {
+        for (const pc of police.cars) {
+          if (Math.hypot(pc.x - car.x, pc.z - car.z) < 30) {
+            police.addHeat(WANTED.speedNearPolice * dt);
+            break;
+          }
+        }
+      }
+      // The camera rides behind the car.
+      state.camYaw = car.heading;
+      audio.setSpeed(Math.abs(car.speed) * 3.6);
+    } else {
+      const w = input.walk();
+      stepPlayer(player, dt, { x: w.x, z: w.z }, w.run, input.yaw, world);
+      state.camYaw = input.yaw;
+      audio.setSpeed(0);
+      if (shootQueued) {
+        shootQueued = false;
+        const result = fireWeapon(player, police, world);
+        if (result && result.kind !== 'empty') audio.shot();
+        if (result && result.kind === 'hit') {
+          hud.showDialogue('KAI', 'Hit.');
         }
       }
     }
-    if (game.currentCar.condition <= 0) {
-      game.currentCar.disabled = true;
-      getOut();
-      say('KAI: The car is done. On foot now.', 'KS');
+
+    // --- The world around the player -------------------------------------------------------
+    traffic.update(dt);
+    const focus = state.playerCar || player;
+    police.update(dt, player, state.playerCar);
+    peds.update(dt, player, police.stars);
+    audio.setSiren(police.stars > 0, police.cars.some((c) => Math.hypot(c.x - focus.x, c.z - focus.z) < 40));
+
+    // --- Missions ----------------------------------------------------------------------------
+    const ctx = { player, playerCar: state.playerCar, police, world, hasGold: state.hasGold };
+    updateMissions(missions, ctx);
+    state.hasGold = ctx.hasGold;
+    if (missions.justFinished) onMissionComplete();
+    if (missions.done && !state.gameOver) {
+      state.gameOver = true;
+      state.screen = 'victory';
+      showOnly('victory');
+      say(DIALOGUE.victory);
+      pumpDialogue();
+      writeSave({ money: state.money, rep: state.rep, mission: MISSIONS.length, hasGold: true });
     }
-  } else {
-    stepPlayer(player, walkAxes, renderer.cameraYaw, dt, world);
-    if (input.firing) shoot();
+    if (player.dead && !state.gameOver) {
+      state.gameOver = true;
+      state.screen = 'busted';
+      showOnly('busted');
+      audio.busted();
+    }
+    if (missions.justAdvanced || missions.justFinished) pumpDialogue();
+
+    // --- Marker + HUD ------------------------------------------------------------------------------
+    const stepInfo = missions.currentStep;
+    if (stepInfo && (stepInfo.kind === 'reach' || stepInfo.kind === 'grab')) {
+      world.setMarker(stepInfo.x, stepInfo.z, true);
+    } else if (stepInfo && stepInfo.kind === 'jumpGap') {
+      world.setMarker(472, 0, true);
+    } else {
+      world.setMarker(0, 0, false);
+    }
+    const focusPos = state.playerCar
+      ? { x: state.playerCar.x, z: state.playerCar.z, heading: state.playerCar.heading }
+      : { x: player.x, z: player.z, heading: player.heading };
+    hud.update({
+      mission: missions,
+      stars: police.stars,
+      money: state.money,
+      rep: state.rep,
+      police: police.cars,
+      speedKmh: state.playerCar ? Math.abs(state.playerCar.speed) * 3.6 : 0,
+      inCar: !!state.playerCar,
+      carName: state.playerCar ? state.playerCar.name : '',
+      weapon: player.weapon,
+      radioOn: audio.radioOn,
+      station: audio.stationName,
+      player: focusPos,
+      marker: stepInfo && (stepInfo.kind === 'reach' || stepInfo.kind === 'grab' || stepInfo.kind === 'jumpGap')
+        ? { x: stepInfo.x ?? 472, z: stepInfo.z ?? 0 }
+        : null,
+    });
   }
 
-  // Police, helicopter, sound.
-  police.update(dt, world, player, game.currentCar, (impact) => {
-    addHeat(25);
-    say(impact > 12 ? 'KAI: They rammed me! Hold on!' : 'SPD: Pull over, Solano!', 'KS');
-  });
-  heli.update(dt, player.pos, game.wantedStars >= 3, game.time);
-  audio.setEngine(game.currentCar ? game.currentCar.speedKmh : 0, !!game.currentCar);
-  audio.setSiren(police.cars.length > 0, game.time);
-
-  // Missions.
-  const outcome = missions.update(game);
-  if (outcome === 'advanced') {
-    const payouts = [800, 1200, 1500, 2500, 2000, 15000];
-    game.money += payouts[missions.index - 1] ?? 500;
-    game.rep += 10;
-    audio.mission();
-    storeSave();
-    if (missions.index < 6) {
-      const line = DIALOG.mission[missions.index - 1];
-      if (line) say(line[0], line[1]);
-    }
-  } else if (outcome === 'victory') {
-    game.state = SCREEN_VICTORY;
-    document.getElementById('overlay-title').textContent = 'SOLARIA HEIST COMPLETE';
-    document.getElementById('overlay-lines').innerHTML = '<div>Kai Solano took the gold across the bridge and vanished into the golden hour.</div><div>Final take: $' + Math.round(game.money).toLocaleString('en-US') + ' · Rep ' + Math.round(game.rep) + '</div>';
-    document.getElementById('overlay-prompt').textContent = 'Press Enter or click KEEP PLAYING';
-    showOverlay(true, 'victory');
-    audio.mission();
-    storeSave();
-    statusLine.textContent = 'Victory. Solaria Heist complete.';
+  // --- Camera + render ------------------------------------------------------------------
+  function frame(dt) {
+    const inCar = !!state.playerCar;
+    const target = inCar
+      ? new THREE.Vector3(state.playerCar.x, state.playerCar.y + 1, state.playerCar.z)
+      : new THREE.Vector3(player.x, player.y + 1.2, player.z);
+    updateCamera(camera, {
+      mode: inCar ? 'chase' : 'foot',
+      yaw: state.camYaw,
+      pitch: input.pitch,
+      target,
+      time: state.time,
+    }, dt);
+    renderer.render(scene, camera);
   }
 
-  game.district = world.districtAt(player.pos.x, player.pos.z);
-  if (player.health <= 0) gameOver('busted');
-  world.update(dt, game.time);
-  hud.update(game);
-}
-
-// --- The debug handle the playtest and screenshot drivers use ---------------------------
-window.__solaria = {
-  get state() { return game.state; },
-  get money() { return game.money; },
-  get rep() { return game.rep; },
-  get heat() { return game.heat; },
-  set heat(v) { game.heat = v; },
-  get wantedStars() { return game.wantedStars; },
-  get health() { return player.health; },
-  get hasGold() { return game.hasGold; },
-  set hasGold(v) { game.hasGold = v; },
-  get ammo() { return game.ammo; },
-  get jobs() { return missions; },
-  get currentCar() { return game.currentCar; },
-  get player() { return player; },
-  get actors() { return game.actors; },
-  get world() { return world; },
-  playerSpeedKmh() { return game.currentCar ? game.currentCar.speedKmh : 0; },
-  gameOver,
-  set rammed(v) { game._rammed = v; },
-  get rammed() { return game._rammed ?? 0; },
-};
-window.__solariaError = null;
-
-// --- Screenshot mode ----------------------------------------------------------------------
-function runShot(name) {
-  try {
-    game.state = SCREEN_PLAY;
-    game.input = createInput(canvas);
-    // The title screen is a DOM overlay: hide it, or it covers the scene.
-    document.getElementById('title').style.display = 'none';
-    // Make sure the mission chain and two interceptors exist for staging.
-    missions.start();
-    const view = stageShot(name, game);
-    // The district label is normally set by the loop; in shot mode set it
-    // from the staged position so the HUD agrees with the scene.
-    game.district = world.districtAt(player.pos.x, player.pos.z);
-    hud.update(game);
-    let painted = 0;
-    function paint() {
-      renderer.draw({
-        mode: 'play',
-        targetPos: player.pos,
-        targetHeading: player.heading,
-        inCar: !!game.currentCar,
-        shotCam: view.shotCam,
-        time: game.time,
-      }, 0.016);
-      painted += 1;
-      if (painted < 2) requestAnimationFrame(paint);
-      else window.__shotReady = true;
-    }
-    requestAnimationFrame(paint);
-  } catch (e) {
-    window.__solariaError = String(e && e.stack || e);
-  }
-}
-
-// --- Normal play ----------------------------------------------------------------------------
-function runGame() {
-  game.input = createInput(canvas);
-  let accumulator = 0;
+  // --- The loop -----------------------------------------------------------------------------
   let last = performance.now();
-
-  function announce(message) {
-    statusLine.textContent = message;
-  }
-
-  function handleActions() {
-    const actions = game.input.takeActions();
-    if (actions & ACTION_CONFIRM) {
-      if (game.state === SCREEN_TITLE) startGame(false);
-      else if (game.state === SCREEN_OVER || game.state === SCREEN_VICTORY) {
-        if (game.state === SCREEN_VICTORY) {
-          game.state = SCREEN_PLAY;
-          showOverlay(false);
-        } else startGame(false);
-      }
-    } else if (actions & ACTION_PAUSE) {
-      if (game.state === SCREEN_PLAY) {
-        game.state = SCREEN_PAUSED;
-        document.getElementById('overlay-title').textContent = 'PAUSED';
-        document.getElementById('overlay-lines').innerHTML = '<div>The bay waits for you.</div>';
-        document.getElementById('overlay-prompt').textContent = 'Press Esc or click RESUME';
-        showOverlay(true, 'pause');
-        announce('Paused.');
-      } else if (game.state === SCREEN_PAUSED) {
-        game.state = SCREEN_PLAY;
-        showOverlay(false);
-        announce('Playing.');
-      }
-    }
-    if (game.state === SCREEN_PLAY) {
-      if (actions & ACTION_ENTER) {
-        if (game.currentCar) getOut();
-        else getIn();
-      }
-      if (actions & ACTION_WEAPON_NEXT) {
-        game.weapon = (actions & 512) ? 2 : (actions & 256) ? 1 : 0;
-      }
-      if (actions & ACTION_RADIO) {
-        game.station = audio.nextStation();
-      }
-      if (actions & ACTION_MUTE) {
-        audio.toggleMute();
-      }
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const frameDt = Math.min((now - last) / 1000, MAX_FRAME);
-    accumulator += frameDt;
+  let acc = 0;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min((now - last) / 1000, 0.1);
     last = now;
-    handleActions();
-    while (accumulator >= STEP && game.state !== SCREEN_PAUSED) {
+    if (state.screen === 'title') {
+      updateCamera(camera, { mode: 'title', time: state.time, target: new THREE.Vector3() }, dt);
+      state.time += dt;
+      renderer.render(scene, camera);
+      return;
+    }
+    acc += dt;
+    while (acc >= STEP) {
       step(STEP);
-      accumulator -= STEP;
+      acc -= STEP;
     }
-    if (game.state === SCREEN_PAUSED) accumulator = 0;
-    const view = {
-      mode: game.state === SCREEN_TITLE ? 'title' : 'play',
-      targetPos: player.pos,
-      targetHeading: player.heading,
-      inCar: !!game.currentCar,
-      shotCam: null,
-      time: game.time,
+    frame(dt);
+  }
+
+  // --- Buttons --------------------------------------------------------------------------------
+  const startBtn = document.getElementById('start-btn');
+  if (startBtn) {
+    startBtn.addEventListener('click', () => {
+      audio.start();
+      state.screen = 'play';
+      showOnly(null);
+      pumpDialogue();
+    });
+  }
+  const resumeBtn = document.getElementById('resume-btn');
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', () => {
+      state.screen = 'play';
+      showOnly(null);
+    });
+  }
+  const retryBtn = document.getElementById('retry-btn');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', () => {
+      window.location.reload();
+    });
+  }
+  const victoryBtn = document.getElementById('victory-btn');
+  if (victoryBtn) {
+    victoryBtn.addEventListener('click', () => {
+      window.location.reload();
+    });
+  }
+
+  window.addEventListener('resize', () => resizeRenderer(renderer, camera));
+
+  // --- Shot driver ------------------------------------------------------------------------------
+  if (shot && SHOTS[shot]) {
+    showOnly(null);
+    hud.setVisible(true);
+    audio.start();
+    // Spawn the police the staging needs, then stage the scene.
+    police.heat = 600;
+    for (let i = 0; i < 3; i++) police.spawnOne();
+    police.ensureHelicopter();
+    const G = {
+      scene,
+      world,
+      player,
+      heroCar,
+      trafficCars: traffic.cars,
+      policeCars: police.cars,
+      police,
+      peds: peds.peds,
+      missions,
+      heli: police.heliGroup,
+      camera,
     };
-    renderer.draw(view, Math.max(frameDt, 0.016));
-    if (game.state === SCREEN_PLAY || game.state === SCREEN_TITLE) hud.update(game);
-  }
-
-  // Title screen buttons.
-  document.getElementById('btn-new').addEventListener('click', () => startGame(false));
-  const save = loadSave();
-  const continueBtn = document.getElementById('btn-continue');
-  if (save && save.mission > 0) {
-    continueBtn.style.display = 'inline-block';
-    continueBtn.textContent = `CONTINUE — MISSION ${Math.min(save.mission + 1, 6)}`;
-    continueBtn.addEventListener('click', () => startGame(true));
-  }
-  document.getElementById('btn-resume').addEventListener('click', () => {
-    game.state = SCREEN_PLAY;
-    showOverlay(false);
-  });
-  document.getElementById('btn-retry').addEventListener('click', () => startGame(false));
-  document.getElementById('btn-keep').addEventListener('click', () => {
-    game.state = SCREEN_PLAY;
-    showOverlay(false);
-  });
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && game.state === SCREEN_PLAY) {
-      game.state = SCREEN_PAUSED;
-      document.getElementById('overlay-title').textContent = 'PAUSED';
-      document.getElementById('overlay-lines').innerHTML = '<div>The bay waits for you.</div>';
-      document.getElementById('overlay-prompt').textContent = 'Press Esc or click RESUME';
-      showOverlay(true, 'pause');
-      announce('Paused.');
+    const view = SHOTS[shot](G);
+    // The staging sets the heat; the star count is derived from it.
+    // (In normal play police.update() does this every frame, but a
+    // still never steps the simulation.)
+    police.stars = police.wantedStars;
+    // Light the police bars for the still.
+    for (const car of police.cars) {
+      for (const m of car.beacon.red || []) if (m.emissive) m.emissiveIntensity = 1.6;
+      for (const m of car.beacon.blue || []) if (m.emissive) m.emissiveIntensity = 0.1;
     }
-  });
+    // The HUD for this shot. The overlook is Kai on foot; the other
+    // three are the hero at speed.
+    const stepInfo = missions.currentStep;
+    const onFoot = shot === 'overlook';
+    hud.update({
+      mission: missions,
+      stars: police.stars,
+      money: state.money,
+      rep: state.rep,
+      police: police.cars,
+      speedKmh: onFoot ? 0 : Math.abs(heroCar.speed) * 3.6,
+      inCar: !onFoot,
+      carName: heroCar.name,
+      weapon: player.weapon,
+      radioOn: true,
+      station: audio.stationName,
+      player: { x: heroCar.x, z: heroCar.z, heading: heroCar.heading },
+      marker: stepInfo ? { x: stepInfo.x ?? 472, z: stepInfo.z ?? 0 } : null,
+    });
+    // Paint twice (shadows + the HUD settle), then signal readiness.
+    updateCamera(camera, { mode: 'fixed', pos: view.pos, target: view.target }, 0);
+    renderer.render(scene, camera);
+    updateCamera(camera, { mode: 'fixed', pos: view.pos, target: view.target }, 0);
+    renderer.render(scene, camera);
+    window.__shotReady = true;
+    return;
+  }
 
-  announce('Solaria Bay. Press Enter or click NEW GAME to start.');
-  requestAnimationFrame(frame);
+  // --- Go ----------------------------------------------------------------------------------------
+  if (loadingScreen) loadingScreen.style.display = 'none';
+  showOnly('title');
+  requestAnimationFrame(loop);
 }
 
-try {
-  if (shotName) runShot(shotName);
-  else runGame();
-} catch (e) {
-  window.__solariaError = String(e && e.stack || e);
-}
+boot().catch((e) => {
+  // The error is already reported on window.__solariaError and on screen.
+  console.error(e);
+});

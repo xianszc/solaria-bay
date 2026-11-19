@@ -1,143 +1,107 @@
 // The story: six missions with a clear arc — arrive, steal the GT, cross
 // town, jump the raised drawbridge, go quiet, then the heist. The mission
-// state lives in one object; each step kind has its own checker in a
-// dispatch table, so adding a kind means adding one function, not
-// another branch in a switch.
+// state lives in one object; each step kind has its own checker. When
+// every step of the last mission is done, the game is won.
+
 import { MISSIONS } from './config.js';
 
-export function createMissions(world) {
-  const state = {
+export function createMissions() {
+  return {
     index: 0,
     step: 0,
-    active: false,
     done: false,
-    message: '',
-    timer: 0,
-  };
-
-  // After the final mission the index runs past the list; keep showing
-  // the last mission instead of crashing the HUD.
-  function current() {
-    return MISSIONS[Math.min(state.index, MISSIONS.length - 1)];
-  }
-  function currentStep() {
-    const mission = current();
-    return mission.steps[Math.min(state.step, mission.steps.length - 1)];
-  }
-
-  function showMarker() {
-    const s = currentStep();
-    if (s.kind === 'reach' || s.kind === 'grab') world.setMarker(s.x, s.z);
-    else world.clearMarker();
-  }
-
-  function announce(text, seconds) {
-    state.message = text;
-    state.timer = seconds;
-  }
-
-  function start() {
-    state.index = 0;
-    state.step = 0;
-    state.active = true;
-    state.done = false;
-    showMarker();
-    announce(`MISSION 1: ${current().name} — ${current().objective}`, 6);
-  }
-
-  function advance() {
-    state.step += 1;
-    const mission = current();
-    if (state.step >= mission.steps.length) {
-      state.index += 1;
-      state.step = 0;
-      if (state.index >= MISSIONS.length) {
-        state.active = false;
-        state.done = true;
-        world.clearMarker();
-        announce('SOLARIA HEIST COMPLETE — the gold is yours, Kai.', 8);
-        return 'victory';
-      }
-      announce(`MISSION ${state.index + 1}: ${current().name} — ${current().objective}`, 6);
-    } else {
-      announce(`Next: ${currentStep().label}`, 4);
-    }
-    showMarker();
-    return 'advanced';
-  }
-
-  // One checker per step kind. Each takes the live game and the step
-  // definition and answers: is this step done?
-  const CHECKERS = {
-    reach(game, s) {
-      return Math.hypot(game.player.pos.x - s.x, game.player.pos.z - s.z) < s.radius;
+    justAdvanced: false, // set for one frame when a step completes
+    justFinished: false, // set for one frame when a mission completes
+    get current() {
+      return MISSIONS[this.index];
     },
-    grab(game, s) {
-      if (game.currentCar) return false; // the case is taken on foot
-      if (Math.hypot(game.player.pos.x - s.x, game.player.pos.z - s.z) >= s.radius) return false;
-      game.hasGold = true;
-      return true;
+    get currentStep() {
+      return this.current ? this.current.steps[this.step] : null;
     },
-    stealHero(game) {
-      return !!(game.currentCar && game.currentCar.hero);
-    },
-    jumpGap(game) {
-      // The car crossed the gap and is on the far deck (or beyond).
-      const car = game.currentCar;
-      return !!(car && car.pos.x > 472 && Math.abs(car.pos.z) <= 12);
-    },
-    loseCops(game) {
-      return game.heat <= 0 && game.wantedStars === 0;
-    },
-  };
-
-  // Test the current step against the live game state. Returns
-  // 'advanced', 'victory' or null.
-  function update(game) {
-    if (!state.active || state.done) return null;
-    const s = currentStep();
-    const checker = CHECKERS[s.kind];
-    if (checker && checker(game, s)) return advance();
-    return null;
-  }
-
-  function tickMessage(dt) {
-    if (state.timer > 0) state.timer -= dt;
-  }
-
-  function skipTo(n) {
-    state.index = Math.min(n, MISSIONS.length - 1);
-    state.step = 0;
-    state.active = true;
-    state.done = false;
-    showMarker();
-    announce(`MISSION ${state.index + 1}: ${current().name} — ${current().objective}`, 6);
-  }
-
-  return {
-    get index() {
-      return state.index;
-    },
-    get step() {
-      return state.step;
-    },
-    get active() {
-      return state.active;
-    },
-    get done() {
-      return state.done;
-    },
-    get message() {
-      return state.timer > 0 ? state.message : '';
-    },
-    current,
-    currentStep,
-    start,
-    skipTo,
-    update,
-    tickMessage,
-    setMessage(text, seconds = 5) {
-      announce(text, seconds);
+    get isLast() {
+      return this.index === MISSIONS.length - 1;
     },
   };
 }
+
+// Advance one step; if the mission is finished, move to the next.
+function advance(missions) {
+  missions.step += 1;
+  missions.justAdvanced = true;
+  if (missions.step >= missions.current.steps.length) {
+    missions.index += 1;
+    missions.step = 0;
+    missions.justFinished = true;
+    if (missions.index >= MISSIONS.length) {
+      missions.done = true;
+    }
+  }
+}
+
+// Check the current step against the live game. `ctx` carries the player,
+// the car they are in (or null), the police, the world, and whether the
+// gold case is already in hand. Returns nothing; the flags on `missions`
+// tell the caller what happened this frame.
+export function updateMissions(missions, ctx) {
+  missions.justAdvanced = false;
+  missions.justFinished = false;
+  if (missions.done) return;
+  const step = missions.currentStep;
+  if (!step) return;
+  const { player, playerCar, police, world } = ctx;
+  const px = playerCar ? playerCar.x : player.x;
+  const pz = playerCar ? playerCar.z : player.z;
+
+  if (step.kind === 'reach') {
+    if (Math.hypot(px - step.x, pz - step.z) < step.radius) advance(missions);
+  } else if (step.kind === 'stealHero') {
+    if (playerCar && playerCar.key === 'hero') advance(missions);
+  } else if (step.kind === 'jumpGap') {
+    // Past the gap, on the far deck, moving east.
+    if (playerCar && playerCar.x > 472 && Math.abs(playerCar.z) <= 12) advance(missions);
+  } else if (step.kind === 'loseCops') {
+    // On Solaria Key (mission 5) or back on the mainland (mission 6)
+    // with the heat gone.
+    const onKey = px >= 560;
+    const onMainland = px < 300;
+    const rightPlace = missions.index === 4 ? onKey : onMainland;
+    if (rightPlace && police.stars === 0 && police.heat < 30) advance(missions);
+  } else if (step.kind === 'grab') {
+    if (!playerCar && Math.hypot(player.x - step.x, player.z - step.z) < step.radius) {
+      ctx.hasGold = true;
+      advance(missions);
+    }
+  }
+}
+
+// The dialogue lines Dara and Kai trade as the story moves.
+export const DIALOGUE = {
+  start: [
+    ['DARA', 'Kai. You are back. Marina Row. Come find me.'],
+    ['KAI', 'On my way. The city looks the same.'],
+  ],
+  pickup: [
+    ['DARA', 'The GT is under the middle sail. It was always yours. Take it.'],
+    ['KAI', 'She still runs. She remembers me.'],
+  ],
+  tower: [
+    ['DARA', 'Show them the GT still runs. Twin Prism Towers. All the way across town.'],
+    ['KAI', 'Flat out. Let them watch.'],
+  ],
+  jump: [
+    ['DARA', 'The drawbridge is up — thirty degrees of steel over a thirty-metre gap.'],
+    ['KAI', 'Then I jump it.'],
+  ],
+  golden: [
+    ['DARA', 'The whole SPD is on the Key. Go quiet. Break line of sight. Let it fade.'],
+    ['KAI', 'Quiet. Like golden hour.'],
+  ],
+  heist: [
+    ['DARA', 'The gold case is in the Key vault. Grab it, get back over the bridge, disappear.'],
+    ['KAI', 'One last run.'],
+  ],
+  victory: [
+    ['DARA', 'You did it. The case is ours. Solaria Bay is yours, Kai.'],
+    ['KAI', 'Home.'],
+  ],
+};
