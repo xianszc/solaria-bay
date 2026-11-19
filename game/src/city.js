@@ -1,17 +1,25 @@
-// SOLARIA BAY's city: the main island, the causeway with its raised
-// drawbridge, Solaria Key, the bay, and the low western sun. The city
-// mixes real models with procedural filler: BlenderKit hero buildings
-// and an OSM city block sit on the street grid, detailed procedural
-// buildings fill the remaining blocks, and a glass-tower CBD rises
-// behind the Twin Prism Towers. This file also answers the gameplay
-// questions the other systems ask: how high is the ground here, which
-// district is this, and where is the mission marker.
+// SOLARIA BAY's city, v3.1: the main island, the causeway with its
+// raised drawbridge, Solaria Key, the bay, and the low western sun.
+// The city mixes real models with procedural filler: BlenderKit hero
+// buildings and an OSM city block sit on the street grid, a dense
+// glass-tower CBD rises behind the Twin Prism Towers, detailed
+// procedural mid-rise buildings fill the remaining blocks, and real
+// Bajwa palm trees line the boulevard and the marina. This file also
+// answers the gameplay questions the other systems ask: how high is
+// the ground here, which district is this, and where is the mission
+// marker.
+//
+// v3.1 layout (Xian's brief): the CBD is a tight, legible cluster —
+// two columns of tall towers packed around the Twin Prism Towers —
+// and the streets around it are filled with mid-rise buildings, so
+// the city reads as a real downtown with a clear centre, not a few
+// lonely slabs scattered over empty blocks.
 
 import * as THREE from 'three';
 import { WORLD, SUN, PALETTE } from './config.js';
 import {
   Bucket, buildBuilding, facadeTextures,
-  makePalm, makeBoat, makeShadeSail, makeGlassTower, makeSunDisc, makeGoldCase,
+  makeBoat, makeShadeSail, makeSunDisc, makeGoldCase,
 } from './models.js';
 
 const V3 = THREE.Vector3;
@@ -22,6 +30,25 @@ const WALK_W = 2.5;
 
 function inRect(x, z, x0, z0, x1, z1) {
   return x >= x0 && x <= x1 && z >= z0 && z <= z1;
+}
+
+// A tall glass tower for the dense CBD, merged into the caller's
+// Bucket (so a whole downtown costs a handful of draw calls, not one
+// per mullion). Body + vertical mullions + a crown that catches the
+// sunset + a darker base band.
+function buildCbdTower(bucket, glassMats, frameMat, rng, x, z, w, h, d) {
+  const glass = glassMats[rng.int(0, glassMats.length - 1)];
+  bucket.box(glass, x, h / 2, z, w, h, d);
+  bucket.box(frameMat, x, h + 1.5, z, w * 0.6, 3, d * 0.6);
+  bucket.box(frameMat, x, 1.5, z, w + 0.4, 3, d + 0.4);
+  const cols = Math.max(3, Math.floor(w / 4));
+  for (let i = 0; i <= cols; i++) {
+    const mx = x - w / 2 + (i / cols) * w;
+    for (const side of [1, -1]) {
+      bucket.box(frameMat, mx, h / 2, z + side * (d / 2 + 0.05), 0.18, h, 0.18);
+    }
+  }
+  return { x, z, w, d, h };
 }
 
 // A sky dome: bright blue overhead fading to apricot at the horizon.
@@ -390,23 +417,40 @@ export function buildWorld(scene, assets, rng) {
     });
   });
 
-  // --- CBD glass towers behind the Prism pair ---------------------------------
-  const cbd = [
-    [-240, -170, 26, 110, 26, 0x6a9ab8],
-    [-200, 140, 24, 88, 24, 0x4a7a9a],
-    [-300, 170, 22, 130, 22, 0x6a9ab8],
-    [-160, -210, 20, 72, 20, 0x8fb8d9],
-    [-300, -170, 20, 96, 20, 0x4a7a9a],
-    [-190, 210, 22, 64, 22, 0x6a9ab8],
+  // --- Dense CBD: a tight cluster of tall glass towers in the west -----------
+  // v3.1: the six scattered glass towers are gone, replaced by a dense,
+  // legible downtown — two columns of tall towers packed around the
+  // Twin Prism Towers, so the skyline reads as a real CBD from the
+  // boulevard and the causeway. Bucket-merged (a handful of draw calls
+  // for the whole cluster); the supertalls stay the landmarks. The
+  // z = 0 road stays clear so the Tower Run approach is never blocked,
+  // and no tower sits on a street.
+  const cbdSpots = [
+    [-280, -280], [-280, -200], [-280, 200], [-280, 280],
+    [-200, -280], [-200, -200], [-200, -120], [-200, -40],
+    [-200, 40], [-200, 120], [-200, 200], [-200, 280],
   ];
-  for (const [x, z, w, h, d, tint] of cbd) {
-    const tower = makeGlassTower(w, h, d, tint);
-    tower.position.set(x, 0, z);
-    scene.add(tower);
-    addCollider(x, z, w, d, h);
+  const cbdGlass = [
+    new THREE.MeshStandardMaterial({ color: 0x6a9ab8, roughness: 0.12, metalness: 0.65 }),
+    new THREE.MeshStandardMaterial({ color: 0x4a7a9a, roughness: 0.12, metalness: 0.65 }),
+    new THREE.MeshStandardMaterial({ color: 0x8fb8d9, roughness: 0.12, metalness: 0.65 }),
+  ];
+  const cbdFrame = new THREE.MeshStandardMaterial({ color: 0x2b2d42, roughness: 0.6 });
+  const cbdBucket = new Bucket();
+  for (const [cx, cz] of cbdSpots) {
+    const w = rng.range(20, 26);
+    const d = rng.range(20, 26);
+    const h = rng.range(60, 140);
+    buildCbdTower(cbdBucket, cbdGlass, cbdFrame, rng, cx, cz, w, h, d);
+    addCollider(cx, cz, w, d, h);
   }
+  cbdBucket.build(scene);
 
   // --- Procedural filler buildings (Phase 2 system, Bucket-merged) ------------
+  // v3.1: denser. The skip rate drops (22% -> 8%) and the second
+  // building per block rises (45% -> 65%), so the streets between the
+  // heroes fill with mid-rise buildings instead of empty lots. Heights
+  // stay mid-rise (9-34 m) — the tall stuff belongs to the CBD.
   const mats = facadeTextures();
   const facadeMats = {
     brick: new THREE.MeshStandardMaterial({ map: mats.brick, roughness: 0.9 }),
@@ -429,6 +473,10 @@ export function buildWorld(scene, assets, rng) {
     if (bx < -225) return false; // tower strip
     if (Math.abs(bx - 160) < 45 && Math.abs(bz - 120) < 40) return false; // garage
     if (Math.abs(bx + 60) < 40 && Math.abs(bz - 40) < 40) return false; // spawn clearing
+    // The dense CBD: no filler building inside a tower's block.
+    for (const [cx, cz] of cbdSpots) {
+      if (Math.abs(bx - cx) < 40 && Math.abs(bz - cz) < 40) return false;
+    }
     for (const r of heroRects) {
       if (bx > r.x0 - 30 && bx < r.x1 + 30 && bz > r.z0 - 30 && bz < r.z1 + 30) return false;
     }
@@ -437,7 +485,7 @@ export function buildWorld(scene, assets, rng) {
   for (const bx of BLOCKS) {
     for (const bz of BLOCKS) {
       if (!blockFree(bx, bz)) continue;
-      if (rng.chance(0.22)) continue;
+      if (rng.chance(0.08)) continue;
       const ox = rng.range(-8, 8);
       const oz = rng.range(-8, 8);
       const nearRoad = Math.abs(bx) < 100 || Math.abs(bz) < 100;
@@ -449,7 +497,7 @@ export function buildWorld(scene, assets, rng) {
       });
       addCollider(info.x, info.z, info.w, info.d, info.h);
       // A second smaller building in the same block, offset so they don't touch.
-      if (rng.chance(0.45)) {
+      if (rng.chance(0.65)) {
         const info2 = buildBuilding(bucket, facadeMats, rng, bx - ox * 1.6, bz - oz * 1.6, {
           w: rng.range(12, 18),
           d: rng.range(12, 18),
@@ -556,32 +604,47 @@ export function buildWorld(scene, assets, rng) {
   }
   keyBucket.build(scene);
 
-  // --- Palms, lamps, hydrants, benches, traffic signals -----------------------
-  const palmSpots = [];
-  for (const sx of STREETS) {
-    for (let z = -280; z <= 280; z += 40) {
-      if (rng.chance(0.55)) continue;
-      if (inRect(sx, z, O.osmX0, O.osmZ0, O.osmX1, O.osmZ1)) continue;
-      palmSpots.push([sx + 8.5, z]);
-    }
-  }
-  for (const sz of STREETS) {
-    for (let x = -280; x <= 280; x += 40) {
-      if (rng.chance(0.55)) continue;
-      if (inRect(x, sz, O.osmX0, O.osmZ0, O.osmX1, O.osmZ1)) continue;
-      palmSpots.push([x, sz + 8.5]);
-    }
-  }
+  // --- Bajwa palms, lamps, hydrants, benches, traffic signals -----------------
+  // v3.1: the procedural starburst palms are gone. Fifteen real Bajwa
+  // palms (BlenderKit, CC0) line the boulevard, the marina and the
+  // causeway approach. Two meshes each, so fifteen cost ~30 draw calls.
+  // Scale 0.75x (~11.5 m tall), raised 0.225 m — the model's base sits
+  // 0.30 m below its origin, and 0.30 * 0.75 = 0.225.
+  //
+  // PLACEMENT RULE (Xian): a palm NEVER stands on a drivable road
+  // surface. Every palm below is on a sidewalk, on the marina
+  // waterfront ground, or on a planting verge — never on asphalt, never
+  // on a zebra crossing, never on a mission path. The roads are 12 m
+  // wide (asphalt |offset| <= 6 m) with a 2.5 m sidewalk (6 m <
+  // |offset| <= 8.5 m), so a roadside palm sits at |offset| 7.5 m —
+  // the middle of the sidewalk. And a palm is placed MID-BLOCK, never
+  // at an intersection: a palm at (streetX, +/-7.5) would stand on the
+  // crossing street's centreline, in the middle of that road. So the
+  // boulevard palms use BLOCK x positions (between the north-south
+  // streets), and the x = 0 road palms use BLOCK z positions (between
+  // the east-west streets). The north sidewalk of the boulevard inside
+  // the OSM district's x-range would sit inside the district itself
+  // (the district's south edge is z = -6), so those palms use the
+  // south sidewalk instead. The marina palms sit on the ground at the
+  // water's edge (z = 300, just south of the boardwalk), BETWEEN the
+  // docks (docks at x = -120, -60, 0, 60) so no palm stands on a dock.
+  const palmSpots = [
+    // Palm Boulevard (z = 0), mid-block, on the sidewalk (z = +/-7.5).
+    [-200, -7.5], [-120, 7.5], [-40, 7.5], [40, 7.5], [120, 7.5], [200, -7.5],
+    // The x = 0 road, mid-block, on the sidewalk (x = +/-7.5), south of
+    // the OSM district (the road does not run through the district).
+    [7.5, 40], [-7.5, 120], [7.5, 200], [-7.5, 280],
+    // Marina waterfront, on the ground at the water's edge, between docks.
+    [-90, 300], [-30, 300], [30, 300],
+    // Causeway approach (the z = 0 road east to the causeway), mid-block
+    // on both sidewalks.
+    [280, 7.5], [280, -7.5],
+  ];
   for (const [px, pz] of palmSpots) {
-    const palm = makePalm();
-    palm.position.set(px, 0, pz);
+    const palm = assets.palm.clone();
+    palm.scale.setScalar(0.75);
+    palm.position.set(px, 0.225, pz);
     palm.rotation.y = rng.range(0, Math.PI * 2);
-    scene.add(palm);
-  }
-  // Marina palms.
-  for (let x = -140; x <= 80; x += 22) {
-    const palm = makePalm();
-    palm.position.set(x, 0, 300);
     scene.add(palm);
   }
   // Street lamps along the main roads (real GLB, ~6.6 m tall).
@@ -687,5 +750,10 @@ export function buildWorld(scene, assets, rng) {
     goldCase,
     garageRoof: { x: 160, z: 120, y: 12 },
     keyVault: { x: 668, z: 40 },
+    // The Scout template + clips, for Kai and the male pedestrians,
+    // and the female template, for the female pedestrians
+    // (characters.js reads these off the world so main.js needs no change).
+    scout: assets.scout,
+    female: assets.female,
   };
 }

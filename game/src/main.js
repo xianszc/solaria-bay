@@ -96,7 +96,7 @@ async function boot() {
   // --- The game objects ---------------------------------------------------------
   const save = loadSave();
   const player = createPlayer(scene, world);
-  const peds = new Pedestrians(scene, world, rng, 24);
+  const peds = new Pedestrians(scene, world, rng, 16);
   const traffic = new Traffic(scene, assets, world, rng);
   const police = new Police(scene, assets, world, rng);
   const missions = createMissions();
@@ -240,6 +240,35 @@ async function boot() {
   });
 
   // --- The fixed-step update ------------------------------------------------------------
+  // Refresh the HUD from the live state. Called every step AND
+  // synchronously the moment the game starts, so the mission panel,
+  // minimap and radio read correctly even before the first frame paints
+  // (on very slow hardware a frame can take seconds, and a HUD that
+  // only updates per-frame would still show the title screen's blanks).
+  function refreshHUD() {
+    const stepInfo = missions.currentStep;
+    const focusPos = state.playerCar
+      ? { x: state.playerCar.x, z: state.playerCar.z, heading: state.playerCar.heading }
+      : { x: player.x, z: player.z, heading: player.heading };
+    hud.update({
+      mission: missions,
+      stars: police.stars,
+      money: state.money,
+      rep: state.rep,
+      police: police.cars,
+      speedKmh: state.playerCar ? Math.abs(state.playerCar.speed) * 3.6 : 0,
+      inCar: !!state.playerCar,
+      carName: state.playerCar ? state.playerCar.name : '',
+      weapon: player.weapon,
+      radioOn: audio.radioOn,
+      station: audio.stationName,
+      player: focusPos,
+      marker: stepInfo && (stepInfo.kind === 'reach' || stepInfo.kind === 'grab' || stepInfo.kind === 'jumpGap')
+        ? { x: stepInfo.x ?? 472, z: stepInfo.z ?? 0 }
+        : null,
+    });
+  }
+
   function step(dt) {
     state.time += dt;
     const inCar = !!state.playerCar;
@@ -354,26 +383,7 @@ async function boot() {
     } else {
       world.setMarker(0, 0, false);
     }
-    const focusPos = state.playerCar
-      ? { x: state.playerCar.x, z: state.playerCar.z, heading: state.playerCar.heading }
-      : { x: player.x, z: player.z, heading: player.heading };
-    hud.update({
-      mission: missions,
-      stars: police.stars,
-      money: state.money,
-      rep: state.rep,
-      police: police.cars,
-      speedKmh: state.playerCar ? Math.abs(state.playerCar.speed) * 3.6 : 0,
-      inCar: !!state.playerCar,
-      carName: state.playerCar ? state.playerCar.name : '',
-      weapon: player.weapon,
-      radioOn: audio.radioOn,
-      station: audio.stationName,
-      player: focusPos,
-      marker: stepInfo && (stepInfo.kind === 'reach' || stepInfo.kind === 'grab' || stepInfo.kind === 'jumpGap')
-        ? { x: stepInfo.x ?? 472, z: stepInfo.z ?? 0 }
-        : null,
-    });
+    refreshHUD();
   }
 
   // --- Camera + render ------------------------------------------------------------------
@@ -397,7 +407,15 @@ async function boot() {
   let acc = 0;
   function loop(now) {
     requestAnimationFrame(loop);
-    const dt = Math.min((now - last) / 1000, 0.1);
+    // The clamp is the game's time budget per frame: at 60 FPS dt is
+    // ~0.016 s and the clamp never bites, so real gameplay is untouched.
+    // On very slow hardware (software rendering) a frame can take many
+    // seconds; a 1.0 s budget lets game time advance 60 fixed steps
+    // per frame, so the game stays playable — the car still moves, the
+    // heat still decays, input (F to exit a car) and mission checks
+    // still land inside real-time timeouts — instead of freezing in
+    // real time while the renderer catches up.
+    const dt = Math.min((now - last) / 1000, 1.0);
     last = now;
     if (state.screen === 'title') {
       updateCamera(camera, { mode: 'title', time: state.time, target: new THREE.Vector3() }, dt);
@@ -420,6 +438,10 @@ async function boot() {
       audio.start();
       state.screen = 'play';
       showOnly(null);
+      // Paint the HUD now, synchronously — the mission panel, stars and
+      // radio must read correctly the moment play starts, not after the
+      // next (possibly seconds-away) frame.
+      refreshHUD();
       pumpDialogue();
     });
   }
@@ -477,10 +499,11 @@ async function boot() {
       for (const m of car.beacon.red || []) if (m.emissive) m.emissiveIntensity = 1.6;
       for (const m of car.beacon.blue || []) if (m.emissive) m.emissiveIntensity = 0.1;
     }
-    // The HUD for this shot. The overlook is Kai on foot; the other
-    // three are the hero at speed.
+    // The HUD for this shot. The overlook and the chase are Kai on
+    // foot; the other two are the hero at speed. On foot, the minimap
+    // arrow sits on Kai, not on the hero car.
     const stepInfo = missions.currentStep;
-    const onFoot = shot === 'overlook';
+    const onFoot = shot === 'overlook' || shot === 'chase';
     hud.update({
       mission: missions,
       stars: police.stars,
@@ -493,7 +516,9 @@ async function boot() {
       weapon: player.weapon,
       radioOn: true,
       station: audio.stationName,
-      player: { x: heroCar.x, z: heroCar.z, heading: heroCar.heading },
+      player: onFoot
+        ? { x: player.x, z: player.z, heading: player.heading }
+        : { x: heroCar.x, z: heroCar.z, heading: heroCar.heading },
       marker: stepInfo ? { x: stepInfo.x ?? 472, z: stepInfo.z ?? 0 } : null,
     });
     // Paint twice (shadows + the HUD settle), then signal readiness.

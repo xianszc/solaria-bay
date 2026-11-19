@@ -1,9 +1,17 @@
-// Asset loading for SOLARIA BAY v3: every GLB and PBR texture the game
-// ships, loaded once up front (the boot awaits this module before the
-// world is built). Real models replace the procedural cars and buildings:
-// a lime Aventador hero, BlenderKit hero buildings, an OSM city block,
-// a fleet of traffic / police / emergency vehicles, Poly Haven street
-// furniture, and dark charcoal Asphalt025C.
+// Asset loading for SOLARIA BAY v3.1: every GLB and PBR texture the
+// game ships, loaded once up front (the boot awaits this module before
+// the world is built). Real models replace the procedural cars and
+// buildings: a lime Aventador hero, BlenderKit hero buildings, an OSM
+// city block, a fleet of traffic / police / emergency vehicles, Poly
+// Haven street furniture, and dark charcoal Asphalt025C.
+//
+// v3.1 additions: a real palm tree (BlenderKit "Palm Tree Medium
+// Dense", CC0) replaces the procedural starburst palms, and real
+// humans replace the blocky low-poly figures — the Gorgehold Scout
+// (3dassets.dev, CC0), rigged and animated, is Kai and the male
+// pedestrians; the Stylized Female (BlenderKit, Royalty Free), rigged
+// but with NO animation clips, is the female pedestrians (her walk
+// cycle is built in code, in characters.js).
 //
 // Orientation facts (measured in Blender, see the rebuild notes):
 //  - Fleet / showroom cars face local -Z already (bonnet at -Y in Blender
@@ -12,6 +20,15 @@
 //    inner rotation of +PI/2 to face -Z like everything else.
 //  - Showroom cars sit 0.07-0.09 m below the ground; each entry carries
 //    its lift so the wheels touch the asphalt.
+//  - The Bajwa palm's base sits 0.30 m below its origin; at the 0.75x
+//    scale the game uses, raise it 0.30 * 0.75 = 0.225 m.
+//  - The Scout stands 1.81 m tall with his boots at local y = 0; do NOT
+//    offset him by a bounding box (Box3 is wrong for skinned meshes).
+//  - The Stylized Female stands 1.68 m tall, boots at local y = 0, and
+//    faces +Z in three.js (nose at Blender -Y) — the same convention
+//    as the Scout, so the same heading + PI group rotation faces her
+//    where she walks. Her rest pose is a T-pose; characters.js brings
+//    her arms down to her sides and drives her walk cycle.
 // Wheels are the nodes whose name starts with "wheel" and has no "/"
 // (the child meshes are named "wheel-.../alloy" and are skipped).
 
@@ -48,6 +65,26 @@ const BUILDINGS = {
   osmBlock: { file: 'buildings/osm-block.glb', name: 'OSM District', w: 268.5, d: 307.9, h: 25.8 },
 };
 
+// --- v3.1: the real palm and the real humans --------------------------------
+// Bajwa palm: "Palm Tree Medium Dense" (BlenderKit, CC0 1.0), Draco,
+// 2 meshes, 15,851 faces, 15.29 m tall, base 0.30 m below its origin.
+// The game scales it 0.75x and raises it 0.225 m (see the header note).
+// Scout: Gorgehold Scout (3dassets.dev, CC0 1.0), NOT Draco, 1.81 m,
+// rigged (74 bones) with idle / walk / run / grasp clips. The GLB ships
+// a stray 1.9 m helper sphere named "Icosphere" that must be removed
+// on load, or it inflates every bounding box and can render as a giant
+// ball. One file serves Kai AND every male pedestrian (cloned per
+// person), so the game stays under the 48 MiB cap.
+// Female: "Stylized Female Character" (BlenderKit, Royalty Free),
+// 1.68 m, Rigify rig (706 bones) but NO animation clips — her walk
+// cycle is built in code. The optimised GLB still ships the same stray
+// "Icosphere" helper sphere, so it is removed on load exactly like the
+// Scout's. One file serves every female pedestrian (cloned per person);
+// Kai stays the Scout — the female is NPCs only, never the player.
+const PALM_FILE = 'palms/bajwa.glb';
+const SCOUT_FILE = 'characters/scout.glb';
+const FEMALE_FILE = 'characters/female.glb';
+
 function makeLoader() {
   const draco = new DRACOLoader();
   draco.setDecoderPath('./vendor/draco/');
@@ -59,6 +96,14 @@ function makeLoader() {
 function loadGLB(loader, url) {
   return new Promise((resolve, reject) => {
     loader.load(url, (g) => resolve(g.scene), undefined, (e) => reject(new Error(`${url}: ${e && e.message ? e.message : e}`)));
+  });
+}
+
+// Full glTF (scene + animations) — the Scout needs his clips, and the
+// plain scene-only loader above throws them away.
+function loadGLBFull(loader, url) {
+  return new Promise((resolve, reject) => {
+    loader.load(url, (g) => resolve(g), undefined, (e) => reject(new Error(`${url}: ${e && e.message ? e.message : e}`)));
   });
 }
 
@@ -165,6 +210,20 @@ function addBlueBarToSuv(root) {
   return { red, blue: [blueMat] };
 }
 
+// Remove the stray helper sphere that both human GLBs ship with. It is a
+// 1.9 m ball named "Icosphere"; left in place it inflates every bounding
+// box and can render as a giant ball. Called on the template, so no
+// clone ever inherits it.
+function removeStrayIcosphere(root) {
+  const stray = [];
+  root.traverse((o) => {
+    if (o.name === 'Icosphere') stray.push(o);
+  });
+  for (const o of stray) {
+    if (o.parent) o.parent.remove(o);
+  }
+}
+
 export async function loadGameAssets() {
   const loader = makeLoader();
   const base = './assets/';
@@ -231,6 +290,50 @@ export async function loadGameAssets() {
     });
   }
 
+  // --- The Bajwa palm (v3.1) --------------------------------------------------
+  // Draco-compressed; the loader above already carries the DRACO decoder.
+  // Two meshes, so a dozen instances along the boulevard and the marina
+  // cost almost nothing in draw calls.
+  const palm = await loadGLB(loader, base + PALM_FILE);
+  palm.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+
+  // --- The Gorgehold Scout (v3.1): Kai and the male pedestrians ---------------
+  // Loaded once; each person gets a SkeletonUtils clone of this template
+  // (the clone gets its own skeleton so the walk/run clips play per
+  // person). The stray Icosphere helper sphere is removed here, on the
+  // template, so no clone ever inherits it.
+  const scoutGltf = await loadGLBFull(loader, base + SCOUT_FILE);
+  const scoutScene = scoutGltf.scene;
+  removeStrayIcosphere(scoutScene);
+  scoutScene.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  const scout = { template: scoutScene, animations: scoutGltf.animations };
+
+  // --- The Stylized Female (v3.1): the female pedestrians ---------------------
+  // Loaded once; each female pedestrian gets a SkeletonUtils clone of
+  // this template (her own skeleton, so the code-built walk cycle plays
+  // per person). She ships NO animation clips — characters.js builds
+  // her walk cycle as an AnimationClip on the Rigify DEF bones. The
+  // same stray Icosphere is removed here, on the template.
+  const femaleScene = await loadGLB(loader, base + FEMALE_FILE);
+  removeStrayIcosphere(femaleScene);
+  femaleScene.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true;
+      o.receiveShadow = true;
+    }
+  });
+  const female = { template: femaleScene };
+
   // --- Asphalt025C PBR (dark charcoal) ----------------------------------------
   const [asphaltMap, asphaltNormal, asphaltRough, asphaltAo] = await Promise.all([
     loadTexture(base + 'asphalt-color.jpg', true),
@@ -244,6 +347,9 @@ export async function loadGameAssets() {
     buildings,
     furniture: { lamp, hydrant, bench },
     trafficSignal,
+    palm,
+    scout,
+    female,
     asphalt: { map: asphaltMap, normal: asphaltNormal, rough: asphaltRough, ao: asphaltAo },
   };
 }
