@@ -1,134 +1,134 @@
 // The story: six missions with a clear arc — arrive, steal the GT, cross
-// town, jump the raised drawbridge, go quiet, then the heist. Each step
-// is one of a few kinds the game knows how to test: reach a place, steal
-// the hero car, cross the gap, grab the case, lose the cops.
+// town, jump the raised drawbridge, go quiet, then the heist. The mission
+// state lives in one object; each step kind has its own checker in a
+// dispatch table, so adding a kind means adding one function, not
+// another branch in a switch.
 import { MISSIONS } from './config.js';
 
 export function createMissions(world) {
-  let index = 0;
-  let step = 0;
-  let active = false;
-  let done = false;
-  let message = '';
-  let messageTimer = 0;
+  const state = {
+    index: 0,
+    step: 0,
+    active: false,
+    done: false,
+    message: '',
+    timer: 0,
+  };
 
+  // After the final mission the index runs past the list; keep showing
+  // the last mission instead of crashing the HUD.
   function current() {
-    // After the final mission the index runs past the list; keep showing
-    // the last mission instead of crashing the HUD.
-    return MISSIONS[Math.min(index, MISSIONS.length - 1)];
+    return MISSIONS[Math.min(state.index, MISSIONS.length - 1)];
   }
   function currentStep() {
     const mission = current();
-    return mission.steps[Math.min(step, mission.steps.length - 1)];
+    return mission.steps[Math.min(state.step, mission.steps.length - 1)];
   }
 
-  function start() {
-    index = 0;
-    step = 0;
-    active = true;
-    done = false;
-    const s = currentStep();
-    if (s.kind === 'reach' || s.kind === 'grab') world.setMarker(s.x, s.z);
-    message = `MISSION ${index + 1}: ${current().name} — ${current().objective}`;
-    messageTimer = 6;
-  }
-
-  function advance() {
-    step += 1;
-    const mission = current();
-    if (step >= mission.steps.length) {
-      index += 1;
-      step = 0;
-      if (index >= MISSIONS.length) {
-        active = false;
-        done = true;
-        world.clearMarker();
-        message = 'SOLARIA HEIST COMPLETE — the gold is yours, Kai.';
-        messageTimer = 8;
-        return 'victory';
-      }
-      message = `MISSION ${index + 1}: ${current().name} — ${current().objective}`;
-      messageTimer = 6;
-    } else {
-      message = `Next: ${currentStep().label}`;
-      messageTimer = 4;
-    }
+  function showMarker() {
     const s = currentStep();
     if (s.kind === 'reach' || s.kind === 'grab') world.setMarker(s.x, s.z);
     else world.clearMarker();
+  }
+
+  function announce(text, seconds) {
+    state.message = text;
+    state.timer = seconds;
+  }
+
+  function start() {
+    state.index = 0;
+    state.step = 0;
+    state.active = true;
+    state.done = false;
+    showMarker();
+    announce(`MISSION 1: ${current().name} — ${current().objective}`, 6);
+  }
+
+  function advance() {
+    state.step += 1;
+    const mission = current();
+    if (state.step >= mission.steps.length) {
+      state.index += 1;
+      state.step = 0;
+      if (state.index >= MISSIONS.length) {
+        state.active = false;
+        state.done = true;
+        world.clearMarker();
+        announce('SOLARIA HEIST COMPLETE — the gold is yours, Kai.', 8);
+        return 'victory';
+      }
+      announce(`MISSION ${state.index + 1}: ${current().name} — ${current().objective}`, 6);
+    } else {
+      announce(`Next: ${currentStep().label}`, 4);
+    }
+    showMarker();
     return 'advanced';
   }
+
+  // One checker per step kind. Each takes the live game and the step
+  // definition and answers: is this step done?
+  const CHECKERS = {
+    reach(game, s) {
+      return Math.hypot(game.player.pos.x - s.x, game.player.pos.z - s.z) < s.radius;
+    },
+    grab(game, s) {
+      if (game.currentCar) return false; // the case is taken on foot
+      if (Math.hypot(game.player.pos.x - s.x, game.player.pos.z - s.z) >= s.radius) return false;
+      game.hasGold = true;
+      return true;
+    },
+    stealHero(game) {
+      return !!(game.currentCar && game.currentCar.hero);
+    },
+    jumpGap(game) {
+      // The car crossed the gap and is on the far deck (or beyond).
+      const car = game.currentCar;
+      return !!(car && car.pos.x > 472 && Math.abs(car.pos.z) <= 12);
+    },
+    loseCops(game) {
+      return game.heat <= 0 && game.wantedStars === 0;
+    },
+  };
 
   // Test the current step against the live game state. Returns
   // 'advanced', 'victory' or null.
   function update(game) {
-    if (!active || done) return null;
+    if (!state.active || state.done) return null;
     const s = currentStep();
-    const px = game.player.pos.x;
-    const pz = game.player.pos.z;
-    switch (s.kind) {
-      case 'reach': {
-        if (Math.hypot(px - s.x, pz - s.z) < s.radius) return advance();
-        break;
-      }
-      case 'grab': {
-        if (!game.currentCar && Math.hypot(px - s.x, pz - s.z) < s.radius) {
-          game.hasGold = true;
-          return advance();
-        }
-        break;
-      }
-      case 'stealHero': {
-        if (game.currentCar && game.currentCar.hero) return advance();
-        break;
-      }
-      case 'jumpGap': {
-        // The car crossed the gap and is on the far deck (or beyond).
-        const car = game.currentCar;
-        if (car && car.pos.x > 472 && Math.abs(car.pos.z) <= 12) return advance();
-        break;
-      }
-      case 'loseCops': {
-        if (game.heat <= 0 && game.wantedStars === 0) return advance();
-        break;
-      }
-      default:
-        break;
-    }
+    const checker = CHECKERS[s.kind];
+    if (checker && checker(game, s)) return advance();
     return null;
   }
 
   function tickMessage(dt) {
-    if (messageTimer > 0) messageTimer -= dt;
+    if (state.timer > 0) state.timer -= dt;
   }
 
   function skipTo(n) {
-    index = Math.min(n, MISSIONS.length - 1);
-    step = 0;
-    active = true;
-    done = false;
-    const s = currentStep();
-    if (s.kind === 'reach' || s.kind === 'grab') world.setMarker(s.x, s.z);
-    else world.clearMarker();
-    message = `MISSION ${index + 1}: ${current().name} — ${current().objective}`;
-    messageTimer = 6;
+    state.index = Math.min(n, MISSIONS.length - 1);
+    state.step = 0;
+    state.active = true;
+    state.done = false;
+    showMarker();
+    announce(`MISSION ${state.index + 1}: ${current().name} — ${current().objective}`, 6);
   }
 
   return {
     get index() {
-      return index;
+      return state.index;
     },
     get step() {
-      return step;
+      return state.step;
     },
     get active() {
-      return active;
+      return state.active;
     },
     get done() {
-      return done;
+      return state.done;
     },
     get message() {
-      return messageTimer > 0 ? message : '';
+      return state.timer > 0 ? state.message : '';
     },
     current,
     currentStep,
@@ -137,8 +137,7 @@ export function createMissions(world) {
     update,
     tickMessage,
     setMessage(text, seconds = 5) {
-      message = text;
-      messageTimer = seconds;
+      announce(text, seconds);
     },
   };
 }

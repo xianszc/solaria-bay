@@ -1,6 +1,8 @@
-// Keyboard and mouse input. Keys are read as a bitfield each frame so the
-// loop never depends on event timing; actions (confirm, pause, enter car,
-// weapon switch, radio, mute) are edge-triggered and consumed by the loop.
+// Keyboard and mouse. The loop asks this module every frame what is
+// held and what was just pressed, so gameplay never depends on event
+// timing: held keys come back as -1..1 axes, and one-off actions
+// (confirm, pause, enter, weapon, radio, mute) are queued as bits and
+// consumed the first time the loop reads them.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
@@ -10,118 +12,103 @@ export const ACTION_RADIO = 16;
 export const ACTION_MUTE = 32;
 export const ACTION_NITRO = 64;
 
-const KEYMAP = {
-  KeyW: 'up',
-  ArrowUp: 'up',
-  KeyS: 'down',
-  ArrowDown: 'down',
-  KeyA: 'left',
-  ArrowLeft: 'left',
-  KeyD: 'right',
-  ArrowRight: 'right',
-  ShiftLeft: 'nitro',
-  ShiftRight: 'nitro',
-  Space: 'brake',
+// Keys that count as held movement (as opposed to one-off actions).
+const MOVE_CODES = new Set([
+  'KeyW', 'ArrowUp', 'KeyS', 'ArrowDown',
+  'KeyA', 'ArrowLeft', 'KeyD', 'ArrowRight',
+  'ShiftLeft', 'ShiftRight', 'Space',
+]);
+
+// One-off keys: which action bit they set. Digit2/Digit3 carry an extra
+// bit so the loop can tell which weapon was picked.
+const ACTION_KEYS = {
+  Enter: ACTION_CONFIRM,
+  Escape: ACTION_PAUSE,
+  KeyP: ACTION_PAUSE,
+  KeyF: ACTION_ENTER,
+  Digit1: ACTION_WEAPON_NEXT,
+  Digit2: ACTION_WEAPON_NEXT | 256,
+  Digit3: ACTION_WEAPON_NEXT | 512,
+  KeyQ: ACTION_RADIO,
+  KeyM: ACTION_MUTE,
 };
 
 export function createInput(canvas) {
   const held = new Set();
-  let actions = 0;
-  let mouseDown = false;
-  let mouseX = 0;
-  let mouseY = 0;
+  let pending = 0;
+  let firing = false;
+  let pointerX = 0;
+  let pointerY = 0;
 
-  function onKeyDown(e) {
+  function keyDown(e) {
     if (e.repeat) return;
-    const mapped = KEYMAP[e.code];
-    if (mapped) {
-      held.add(mapped);
-      if (mapped === 'nitro') actions |= ACTION_NITRO;
+    if (MOVE_CODES.has(e.code)) {
+      held.add(e.code);
+      if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') pending |= ACTION_NITRO;
       e.preventDefault();
       return;
     }
-    switch (e.code) {
-      case 'Enter':
-        actions |= ACTION_CONFIRM;
-        break;
-      case 'Escape':
-      case 'KeyP':
-        actions |= ACTION_PAUSE;
-        break;
-      case 'KeyF':
-        actions |= ACTION_ENTER;
-        break;
-      case 'Digit1':
-        actions |= ACTION_WEAPON_NEXT;
-        break;
-      case 'Digit2':
-        actions |= ACTION_WEAPON_NEXT | 256;
-        break;
-      case 'Digit3':
-        actions |= ACTION_WEAPON_NEXT | 512;
-        break;
-      case 'KeyQ':
-        actions |= ACTION_RADIO;
-        break;
-      case 'KeyM':
-        actions |= ACTION_MUTE;
-        break;
-      default:
-        break;
-    }
+    const action = ACTION_KEYS[e.code];
+    if (action) pending |= action;
   }
 
-  function onKeyUp(e) {
-    const mapped = KEYMAP[e.code];
-    if (mapped) held.delete(mapped);
+  function keyUp(e) {
+    held.delete(e.code);
   }
 
-  function onMouseDown(e) {
-    mouseDown = true;
-    mouseX = e.clientX;
-    mouseY = e.clientY;
-  }
-
-  function onMouseUp() {
-    mouseDown = false;
-  }
-
-  function onMouseMove(e) {
-    mouseX = e.clientX;
-    mouseY = e.clientY;
-  }
-
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  canvas.addEventListener('mousedown', onMouseDown);
-  window.addEventListener('mouseup', onMouseUp);
-  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('keydown', keyDown);
+  window.addEventListener('keyup', keyUp);
+  canvas.addEventListener('mousedown', (e) => {
+    firing = true;
+    pointerX = e.clientX;
+    pointerY = e.clientY;
+  });
+  window.addEventListener('mouseup', () => {
+    firing = false;
+  });
+  window.addEventListener('mousemove', (e) => {
+    pointerX = e.clientX;
+    pointerY = e.clientY;
+  });
   // A key released while the tab is hidden never sends keyup: let go on blur.
   window.addEventListener('blur', () => held.clear());
 
+  const up = () => held.has('KeyW') || held.has('ArrowUp');
+  const downKey = () => held.has('KeyS') || held.has('ArrowDown');
+  const left = () => held.has('KeyA') || held.has('ArrowLeft');
+  const right = () => held.has('KeyD') || held.has('ArrowRight');
+  const nitro = () => held.has('ShiftLeft') || held.has('ShiftRight');
+
   return {
-    // -1..1 throttle (W/S) and steering (A/D) for this frame.
+    // Driving axes for this frame: throttle -1..1 (W/S), steering -1..1
+    // (A is +1, left; D is -1, right), brake, nitro.
     drive() {
-      const throttle = (held.has('up') ? 1 : 0) - (held.has('down') ? 1 : 0);
-      const steer = (held.has('left') ? 1 : 0) - (held.has('right') ? 1 : 0);
-      return { throttle, steer, brake: held.has('brake'), nitro: held.has('nitro') };
+      return {
+        throttle: (up() ? 1 : 0) - (downKey() ? 1 : 0),
+        steer: (left() ? 1 : 0) - (right() ? 1 : 0),
+        brake: held.has('Space'),
+        nitro: nitro(),
+      };
     },
-    // -1..1 walk direction in camera space for this frame.
+    // Walking axes for this frame, in camera space: forward -1..1 (W/S),
+    // strafe -1..1 (D is +1, right; A is -1, left), run.
     walk() {
-      const forward = (held.has('up') ? 1 : 0) - (held.has('down') ? 1 : 0);
-      const strafe = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
-      return { forward, strafe, run: held.has('nitro') };
+      return {
+        forward: (up() ? 1 : 0) - (downKey() ? 1 : 0),
+        strafe: (right() ? 1 : 0) - (left() ? 1 : 0),
+        run: nitro(),
+      };
     },
     takeActions() {
-      const out = actions;
-      actions = 0;
+      const out = pending;
+      pending = 0;
       return out;
     },
     get firing() {
-      return mouseDown;
+      return firing;
     },
     get pointer() {
-      return { x: mouseX, y: mouseY };
+      return { x: pointerX, y: pointerY };
     },
   };
 }

@@ -1,7 +1,8 @@
-// The HUD: a compact DOM overlay in the SOLARIA style — crisp white type,
-// amber accents, deep-slate translucent panels, a circular wireframe
-// minimap. Dense enough to read as a GTA HUD, small enough to leave the
-// city visible. The minimap is a 2D canvas redrawn every frame.
+// The HUD: a compact DOM overlay in the SOLARIA style — crisp white
+// type, amber accents, deep-slate translucent panels, a circular
+// wireframe minimap. Dense enough to read as a GTA HUD, small enough
+// to leave the city visible. The minimap is a 2D canvas redrawn every
+// frame from the live game state.
 import { WEAPONS } from './config.js';
 
 const DISTRICT_LABELS = {
@@ -17,38 +18,38 @@ const DISTRICT_LABELS = {
 
 export function createHud() {
   const root = document.getElementById('hud');
-  root.innerHTML = `
-    <div id="hud-mission" class="panel">
-      <div class="mission-kicker">MISSION <span id="hud-mission-num">1/6</span></div>
-      <div id="hud-mission-name">FIRST LIGHT</div>
-      <div id="hud-mission-obj">Drive to the Marina Row marker</div>
-      <div id="hud-mission-next">NEXT: The Pickup</div>
-    </div>
-    <div id="hud-right" class="panel">
-      <div id="hud-stars">☆☆☆☆☆</div>
-      <div id="hud-cash">$0</div>
-      <div id="hud-rep">REP 0</div>
-      <div id="hud-police"></div>
-    </div>
-    <div id="hud-district">PALM BOULEVARD</div>
-    <div id="hud-dialog" class="panel"><span id="hud-portrait">DQ</span><span id="hud-dialog-text"></span></div>
-    <div id="hud-weapons"></div>
-    <div id="hud-radio" class="panel"><span id="hud-radio-name">SOLARIA FM 88.5</span><span id="hud-radio-song">Golden Hour — The Apricots</span></div>
-    <div id="hud-speed">
-      <div id="hud-speed-num">0</div>
-      <div id="hud-speed-unit">KM/H · <span id="hud-car-name">ON FOOT</span></div>
-      <div id="hud-cond"><div id="hud-cond-fill"></div></div>
-      <div id="hud-nitro"><div id="hud-nitro-fill"></div></div>
-    </div>
-    <canvas id="hud-minimap" width="180" height="180"></canvas>
-    <div id="hud-crosshair">+</div>
-    <div id="hud-message"></div>
-  `;
+  root.innerHTML = [
+    '<div id="hud-mission" class="panel">',
+    '  <div class="mission-kicker">MISSION <span id="hud-mission-num">1/6</span></div>',
+    '  <div id="hud-mission-name">FIRST LIGHT</div>',
+    '  <div id="hud-mission-obj">Drive to the Marina Row marker</div>',
+    '  <div id="hud-mission-next">NEXT: The Pickup</div>',
+    '</div>',
+    '<div id="hud-right" class="panel">',
+    '  <div id="hud-stars">☆☆☆☆☆</div>',
+    '  <div id="hud-cash">$0</div>',
+    '  <div id="hud-rep">REP 0</div>',
+    '  <div id="hud-police"></div>',
+    '</div>',
+    '<div id="hud-district">PALM BOULEVARD</div>',
+    '<div id="hud-dialog" class="panel"><span id="hud-portrait">DQ</span><span id="hud-dialog-text"></span></div>',
+    '<div id="hud-weapons"></div>',
+    '<div id="hud-radio" class="panel"><span id="hud-radio-name">SOLARIA FM 88.5</span><span id="hud-radio-song">Golden Hour — The Apricots</span></div>',
+    '<div id="hud-speed">',
+    '  <div id="hud-speed-num">0</div>',
+    '  <div id="hud-speed-unit">KM/H · <span id="hud-car-name">ON FOOT</span></div>',
+    '  <div id="hud-cond"><div id="hud-cond-fill"></div></div>',
+    '  <div id="hud-nitro"><div id="hud-nitro-fill"></div></div>',
+    '</div>',
+    '<canvas id="hud-minimap" width="180" height="180"></canvas>',
+    '<div id="hud-crosshair">+</div>',
+    '<div id="hud-message"></div>',
+  ].join('\n');
   const el = (id) => document.getElementById(id);
   const minimap = el('hud-minimap');
   const mctx = minimap.getContext('2d');
 
-  function stars(count) {
+  function renderStars(count) {
     let out = '';
     for (let i = 0; i < 5; i += 1) out += i < count ? '★' : '☆';
     return out;
@@ -59,7 +60,7 @@ export function createHud() {
     const H = 180;
     const cx = W / 2;
     const cy = H / 2;
-    // World bounds: x [-320, 780], z [-320, 320] -> map to the circle.
+    // The world spans x [-320, 780], z [-320, 320]; map it into the circle.
     const scale = 0.135;
     const toMap = (x, z) => [cx + (x - 230) * scale, cy + z * scale];
     mctx.clearRect(0, 0, W, H);
@@ -67,22 +68,19 @@ export function createHud() {
     mctx.beginPath();
     mctx.arc(cx, cy, 86, 0, Math.PI * 2);
     mctx.clip();
-    mctx.fillStyle = 'rgba(27,38,59,0.85)';
-    mctx.fillRect(0, 0, W, H);
-    // Water.
+    // Bay water, then the two landmasses.
     mctx.fillStyle = '#0e6f8f';
     mctx.fillRect(0, 0, W, H);
-    // Islands.
     mctx.fillStyle = '#3a4556';
     const [ix, iy] = toMap(-320, -320);
     mctx.fillRect(ix, iy, 640 * scale, 640 * scale);
     const [kx, ky] = toMap(560, -160);
     mctx.fillRect(kx, ky, 220 * scale, 320 * scale);
-    // Causeway.
+    // The causeway deck between them.
     mctx.fillStyle = '#8a8f96';
     const [bx, by] = toMap(298, -10);
     mctx.fillRect(bx, by, 284 * scale, 20 * scale);
-    // Roads.
+    // The street grid.
     mctx.strokeStyle = '#5a6270';
     mctx.lineWidth = 2;
     for (const line of [-240, -160, -80, 0, 80, 160, 240]) {
@@ -97,7 +95,7 @@ export function createHud() {
       mctx.lineTo(hx + 640 * scale, hy);
       mctx.stroke();
     }
-    // Mission marker.
+    // Where the current step wants you to go.
     const step = game.missions.currentStep ? game.missions.currentStep() : null;
     if (step && (step.kind === 'reach' || step.kind === 'grab') && game.missions.active) {
       const [mx, my] = toMap(step.x, step.z);
@@ -110,7 +108,7 @@ export function createHud() {
       mctx.arc(mx, my, 9, 0, Math.PI * 2);
       mctx.stroke();
     }
-    // Police blips.
+    // Police blips, in blue.
     mctx.fillStyle = '#3fa9ff';
     for (const car of game.actors.police.cars) {
       const [px, py] = toMap(car.pos.x, car.pos.z);
@@ -118,7 +116,15 @@ export function createHud() {
       mctx.arc(px, py, 3, 0, Math.PI * 2);
       mctx.fill();
     }
-    // Player arrow.
+    // The hero car in lime, so it is easy to find again after you park it.
+    if (game.actors.heroCar && game.actors.heroCar !== game.currentCar) {
+      const [hx, hy] = toMap(game.actors.heroCar.pos.x, game.actors.heroCar.pos.z);
+      mctx.fillStyle = '#70e000';
+      mctx.beginPath();
+      mctx.arc(hx, hy, 3, 0, Math.PI * 2);
+      mctx.fill();
+    }
+    // The player: a white arrow (lime when driving) pointing along heading.
     const [px, py] = toMap(game.player.pos.x, game.player.pos.z);
     mctx.save();
     mctx.translate(px, py);
@@ -131,7 +137,7 @@ export function createHud() {
     mctx.closePath();
     mctx.fill();
     mctx.restore();
-    // North marker.
+    // North marker, then the rim.
     mctx.fillStyle = '#ffffff';
     mctx.font = 'bold 11px system-ui, sans-serif';
     mctx.textAlign = 'center';
@@ -150,9 +156,9 @@ export function createHud() {
     el('hud-mission-num').textContent = `${Math.min(missions.index + 1, 6)}/6`;
     el('hud-mission-name').textContent = mission.name;
     el('hud-mission-obj').textContent = mission.objective;
-    const next = missions.index + 1 < 6 ? `NEXT: ${['The Pickup', 'Tower Run', 'The Jump', 'Golden Hour', 'Solaria Heist'][missions.index]}` : 'FINAL MISSION';
-    el('hud-mission-next').textContent = next;
-    el('hud-stars').textContent = stars(game.wantedStars);
+    const nextNames = ['The Pickup', 'Tower Run', 'The Jump', 'Golden Hour', 'Solaria Heist'];
+    el('hud-mission-next').textContent = missions.index + 1 < 6 ? `NEXT: ${nextNames[missions.index]}` : 'FINAL MISSION';
+    el('hud-stars').textContent = renderStars(game.wantedStars);
     el('hud-stars').style.color = game.wantedStars > 0 ? '#ff5a4e' : '#ffffff';
     el('hud-cash').textContent = `$${Math.round(game.money).toLocaleString('en-US')}`;
     el('hud-rep').textContent = `REP ${Math.round(game.rep)}`;
@@ -169,7 +175,7 @@ export function createHud() {
       el('hud-dialog-text').textContent = dialog;
       el('hud-portrait').textContent = game.dialogSpeaker || 'DQ';
     }
-    // Weapons.
+    // Weapons, with the active one highlighted.
     el('hud-weapons').innerHTML = WEAPONS.map((w, i) => {
       const ammo = game.ammo[i];
       const active = i === game.weapon;
