@@ -68,7 +68,7 @@ export function buildWorld(scene, random) {
     return new THREE.MeshLambertMaterial({ color, map: windowTexture });
   }
   const mat = {
-    ground: lambert(0xa8a582), // warm sun-baked ground, not green
+    ground: lambert(0xb3a37e), // warm sun-baked tan (config PALETTE.ground)
     beach: lambert(0xe8d8a8),
     asphalt: lambert(0x3b3835), // warm charcoal — the v1 teal is gone
     dash: lambert(0xe8e4d8),
@@ -93,7 +93,10 @@ export function buildWorld(scene, random) {
   // Zenith blue overhead, a pale blue mid-band, apricot only in a thin
   // band at the horizon. The two-stage mix keeps the mid-sky pale blue —
   // v1 mixed horizon straight into zenith and the middle turned purple.
-  const sunDir = new THREE.Vector3(-Math.cos(SUN.elevation), Math.sin(SUN.elevation), 0.12).normalize();
+  // The sun hangs due west (z = 0), so it sets directly BETWEEN the Twin
+  // Prism Towers (z = -58 and +58) instead of hiding behind the south one.
+  // The 0.12 south offset v1 used put the disc behind the south tower.
+  const sunDir = new THREE.Vector3(-Math.cos(SUN.elevation), Math.sin(SUN.elevation), 0).normalize();
   const skyMaterial = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -134,7 +137,7 @@ export function buildWorld(scene, random) {
   // The sun disc itself: a bright circle far to the west, big enough to
   // read clearly in the cover shot, with a soft glow around it.
   const sunDisc = new THREE.Mesh(
-    new THREE.CircleGeometry(46, 32),
+    new THREE.CircleGeometry(60, 32),
     new THREE.MeshBasicMaterial({ color: 0xfff6e5, fog: false }),
   );
   sunDisc.position.copy(sunDir).multiplyScalar(1250);
@@ -174,28 +177,46 @@ export function buildWorld(scene, random) {
   deep.position.y = WORLD.waterY - 0.6;
   group.add(deep);
 
+  // Ground slabs: their tops MUST sit at y = 0, exactly the height
+  // heightAt() reports for the island and the Key. v2 centred them at
+  // y = -0.1, so their tops were at +0.5 — half a metre ABOVE the
+  // gameplay ground. That buried every road strip (tops at 0.12), every
+  // lane dash, the median, the car wheels (bottoms at 0), Kai's feet and
+  // the palm trunks, which is why the streets read as one flat
+  // grey-green field. Centring the slabs at -0.6 puts their tops at 0.
   const beach = box(680, 1, 680, mat.beach, 0, -0.6, 0, group);
   beach.receiveShadow = true;
-  const island = box(640, 1.2, 640, mat.ground, 0, -0.1, 0, group);
+  const island = box(640, 1.2, 640, mat.ground, 0, -0.6, 0, group);
   island.receiveShadow = true;
-  box(230, 1.2, 330, mat.ground, (WORLD.keyX0 + WORLD.keyX1) / 2, -0.1, 0, group);
+  box(230, 1.2, 330, mat.ground, (WORLD.keyX0 + WORLD.keyX1) / 2, -0.6, 0, group);
   box(250, 1, 350, mat.beach, (WORLD.keyX0 + WORLD.keyX1) / 2, -0.6, 0, group);
 
   // --- Roads: warm asphalt strips on the grid, with centre dashes -------------
+  // Thin raised strips (tops at 0.06, just above the ground at 0) so the
+  // street reads as a street: dark charcoal against the tan blocks, with
+  // pale dashes. The wheels sit at y = 0, so a 0.06 strip only hides
+  // 6 cm of tyre — invisible — while the old 0.12 strips were buried
+  // under the old 0.5 ground and never seen at all.
   for (const line of STREETS) {
-    box(14, 0.12, 640, mat.asphalt, line, 0.06, 0, group).receiveShadow = true;
-    box(640, 0.12, 14, mat.asphalt, 0, 0.06, line, group).receiveShadow = true;
+    box(14, 0.06, 640, mat.asphalt, line, 0.03, 0, group).receiveShadow = true;
+    box(640, 0.06, 14, mat.asphalt, 0, 0.03, line, group).receiveShadow = true;
     for (let d = -300; d <= 300; d += 24) {
-      box(0.7, 0.05, 3.4, mat.dash, line, 0.14, d, group);
-      box(3.4, 0.05, 0.7, mat.dash, d, 0.14, line, group);
+      box(0.7, 0.02, 3.4, mat.dash, line, 0.07, d, group);
+      box(3.4, 0.02, 0.7, mat.dash, d, 0.07, line, group);
     }
   }
   // Palm Boulevard (z = 0) keeps a wider planted median.
-  box(640, 0.2, 4, mat.sidewalk, 0, 0.1, 0, group);
+  box(640, 0.1, 4, mat.sidewalk, 0, 0.05, 0, group);
 
   // --- Buildings ---------------------------------------------------------------
+  // The player spawn (must match createPlayer in characters.js and the
+  // reset in main.js). No building may cover it: the layout is random
+  // per visit, and a tower on the spawn traps the player inside its
+  // collider on ~1 in 3 loads, so the player cannot walk at all.
+  const SPAWN = { x: -60, z: 40 };
   const buildingMats = [mat.glass, mat.glassBlue, mat.glassGold, mat.cream, mat.coral, mat.rose, mat.teal, mat.concrete];
   function addBuilding(x, z, w, d, h, material) {
+    if (x - w / 2 - 4 < SPAWN.x && SPAWN.x < x + w / 2 + 4 && z - d / 2 - 4 < SPAWN.z && SPAWN.z < z + d / 2 + 4) return null;
     const mesh = box(w, h, d, material, x, h / 2, z, group);
     mesh.receiveShadow = true;
     colliders.push({ x0: x - w / 2, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 });
@@ -300,8 +321,8 @@ export function buildWorld(scene, random) {
   addBuilding(620, -80, 26, 26, 64, mat.glassBlue);
   addBuilding(700, -90, 24, 24, 48, mat.teal);
   addBuilding(740, 60, 28, 28, 38, mat.cream);
-  box(220, 0.12, 14, mat.asphalt, 670, 0.06, 0, group);
-  box(14, 0.12, 320, mat.asphalt, 670, 0.06, 0, group);
+  box(220, 0.06, 14, mat.asphalt, 670, 0.03, 0, group);
+  box(14, 0.06, 320, mat.asphalt, 670, 0.03, 0, group);
 
   // --- Palms: boulevards, marina, causeway --------------------------------------
   const palmSpots = [];

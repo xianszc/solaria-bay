@@ -71,13 +71,17 @@ function stageDrawbridge(game) {
   g.missions.setMessage('MISSION 4: THE JUMP — Cross the raised drawbridge', 8);
   return {
     shotCam: {
-      // Close and high on the north-east side, looking west: the lime car
-      // big in the frame in side-rear 3/4, the sun disc right behind it,
-      // the Twin Towers behind that, and the leaf's asphalt deck (not its
-      // tan underside) visible beneath the car. High enough that the near
-      // deck reads as deck, not a black void at the frame's bottom edge.
-      pos: new THREE.Vector3(476, 23, -12),
-      lookAt: new THREE.Vector3(460, 15, -1),
+      // High on the north-east side, looking west and slightly UP at the
+      // car: high enough to see the leaf's asphalt deck (not its
+      // underside — a low eastern camera turns the leaf into a giant
+      // brown slab filling the frame), and aimed so the sun disc (due
+      // west, ~8 degrees up) sits in the upper frame between the Twin
+      // Towers while the interceptors on the deck below stay in the
+      // lower frame. v2 aimed down and the sun fell just outside the
+      // top of the frame; aiming at the car alone cut the police off
+      // at the bottom edge.
+      pos: new THREE.Vector3(480, 22, -12),
+      lookAt: new THREE.Vector3(458, 16, 0),
     },
   };
 }
